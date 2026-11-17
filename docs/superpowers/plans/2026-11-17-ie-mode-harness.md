@@ -250,7 +250,7 @@ Ask the user to put `IEDriverServer.exe` 4.14.0 (Win32) in place and set `IE_DRI
 
     Modes and charset must be identical in (a) and (c), apart from any difference already in (b), which D12 records.
   - **`q7_popup_blocker`:** async click on `do_popup`; report whether a popup window appeared.
-  - **`q8_prompt_ignore`:** session with `unhandled_prompt_behavior = "ignore"`. Click `do_alert` asynchronously, then `execute_script("return 1")` and `get_screenshot_as_png()`. Report the error (if any), whether `switch_to.alert.text == "Hello alert"` still works afterwards, and the alert window's class name and the control IDs of its buttons (`GetDlgCtrlID`). Then open the lookup dialog, click `dialog_alert` inside it, and record the alert's owner hwnd and that owner's class (expected: the dialog's `Internet Explorer_TridentDlgFrame`).
+  - **`q8_prompt_ignore`:** session with `unhandled_prompt_behavior = "ignore"`. Click `do_alert` asynchronously, then `execute_script("return 1")` and `get_screenshot_as_png()`. Report the error (if any), whether `switch_to.alert.text == "Hello alert"` still works afterwards, and the alert window's class name and the control IDs of its buttons (`GetDlgCtrlID`). Then open the lookup dialog (async click on `open_lookup`), click `dialog_alert` inside it asynchronously (through the dialog's document over COM, queued with `setTimeout`, so the spike is not blocked while the alert is open), and record the alert's owner hwnd and that owner's class (expected: the dialog's `Internet Explorer_TridentDlgFrame`).
 
 - [ ] **Step 3: Run the spike on an unlocked desktop**
 
@@ -504,7 +504,7 @@ git commit -m "fix: lease handling, identity-checked process killing, cancellabl
     - They run in one sub-thread (which enters `CALL_CONTEXTS` itself) and that sub-thread releases `DRIVER_LOCK` when the hooks return. The worker waits for it for at most 3 s, then carries on with `AFTER_CALL` and the notices whether or not the hooks have finished.
     - So the tool's result is returned after the hooks finish or after about 3 s, and the lock stays held until the hooks have returned.
     - Exceptions are logged and swallowed; the tool's own result is never changed.
-  - **`protocol.AFTER_CALL: list[Callable[[ToolSpec, dict, dict], None]]`:** empty here; Task 12 adds `dialog_drain`. They run after **every** tool call (driver or not), in the worker, inside `CALL_CONTEXTS`, **without** the driver lock, before the notices are appended. Each runs in its own sub-thread, which enters `CALL_CONTEXTS` itself and builds its own `ComBackend`s, joined for 2 s; exceptions are logged and swallowed.
+  - **`protocol.AFTER_CALL: list[Callable[[ToolSpec, dict, dict], None]]`:** empty here; Task 12 adds `dialog_drain`. They run after **every** tool call (driver or not), **without** the driver lock, before the notices are appended. The worker starts each in its own sub-thread, which enters `CALL_CONTEXTS` itself and builds its own `ComBackend`s, and joins it for 2 s; exceptions are logged and swallowed.
   - **`needs_driver=False` tools:** `ie_sleep`, `ie_browsers`, `ie_kill_orphans`. `ie_status` too: it adds `title`/`url` only if `DRIVER_LOCK.acquire(timeout=0.5)` succeeds, else `"driver": "busy"`.
   - **Settings:** `tool_timeout: float` (`IE_TOOL_TIMEOUT`, default 45); `click_mode: str` (`IE_CLICK_MODE`, `driver`|`async`, default from D1 for the active interaction mode).
   - **`ie_click` gains `mode`** (`driver`|`async`, default `config.SETTINGS.click_mode`). `async` runs `execute_script("var e=arguments[0];window.setTimeout(function(){e.click();},0);return 'queued';", el)`. `double`/`right` actions always use the driver. The tool description states that an async click is script-initiated: no mousedown/mouseup/focus, and (per D8) the pop-up blocker may block `window.open`.
@@ -571,7 +571,7 @@ git commit -m "feat: tool watchdog with budgets, driver lock, async click and mo
   - **`WindowInfo` dataclass:** `hwnd: int, pid: int, cls: str, title: str, kind: str, owner_hwnd: int | None, visible: bool, url: str`. `url` is `""` unless the caller asks for it (`with_url=True`, which only `ie_windows` does, in the worker, through `com_call`); `modal_probe` never reads it, so the probe never touches COM. `kind` is one of `"main"`, `"popup"`, `"html_dialog"`, `"script_dialog"`, `"system_dialog"`, `"other"`.
   - **`classify(cls: str, has_ie_server_child: bool, owner_in_session: bool, hwnd: int, main_hwnd: int | None) -> str`:**
     - `Internet Explorer_TridentDlgFrame` → `html_dialog`.
-    - The alert class recorded by Q8 (expected `#32770`), owned by a session window (main, popup or `html_dialog`) or by an `ATTACHED_TOPS` window directly or through the owner chain → `script_dialog`. This is a *candidate*: Task 9 confirms it before acting.
+    - The alert class recorded by Q8 (expected `#32770`), owned by a session window (main, popup or `html_dialog`) or by an `ATTACHED_TOPS` window directly or through the owner chain → `script_dialog`. `classify` only sees the `owner_in_session` flag; `enumerate_windows` computes it by walking the owner chain. This is a *candidate*: Task 9 confirms it before acting.
     - Any other `#32770` → `system_dialog`.
     - A top window with an `Internet Explorer_Server` descendant → `main` if `hwnd == main_hwnd`, else `popup`.
     - Apply corrections recorded in D6.
@@ -592,7 +592,7 @@ def test_process_tree_walks_children(self)            # rows 1->2->3, 4 unrelate
 def test_classify_trident_dialog_frame_as_html_dialog(self)
 def test_classify_owned_alert_class_as_script_dialog(self)
 def test_classify_alert_owned_by_html_dialog(self)      # alert class owned by a session html_dialog -> "script_dialog"
-def test_classify_alert_owned_by_attached_top(self)     # owned directly by an ATTACHED_TOPS hwnd, and through a two-level owner chain -> "script_dialog"
+def test_enumerate_classifies_alert_owned_through_attached_chain(self)  # fake enum_fn, attached_tops={50}: an alert-class window owned by 50, and one owned by a window owned by 50 -> both listed, kind "script_dialog"
 def test_enumerate_includes_attached_top_dialogs(self)  # attached_tops={50}: a dialog owned by 50 is listed although its pid is not a session pid
 def test_probe_never_reads_url(self)                    # modal_probe() with a fake COM layer -> no COM call made; every url == ""
 def test_failed_url_read_leaves_empty(self)             # with_url=True, COM raises for one window -> that window's url == "", the others are read
@@ -725,7 +725,7 @@ git commit -m "feat: driver and COM backends with per-call target; integration r
 - Test: `tests/test_window_tools.py`, `tests/integration/it_modal.py`, `tests/integration/it_popups_alerts.py`
 
 **Interfaces:**
-- Consumes: `enumerate_windows`, `session_window_pids`, `WindowInfo` (Task 7); `resolve_backend` (Task 8); D1, D2, D8, D9 and Q8 (Task 2).
+- Consumes: `enumerate_windows`, `session_window_pids`, `WindowInfo`, `ATTACHED_TOPS` (Task 7); `resolve_backend` (Task 8); D1, D2, D8, D9 and Q8 (Task 2).
 - Produces:
   - **`ie_windows`** (`needs_driver=False`): a JSON list of `WindowInfo` from `enumerate_windows(session_window_pids(), with_url=True, attached_tops=ATTACHED_TOPS)`, each with `target` (`"hwnd:<n>"`). A URL that cannot be read (for example a COM call rejected while an alert is open) is left as `""`; the tool carries on. Only when `MODAL_PROBE()` is empty and the driver lock is free does it add `driver_handle` (matched by title, then URL) and `current: bool`.
   - **`ie_switch_window(handle: str | None, title_contains: str | None, main: bool = False)`** → `driver.switch_to.window(...)`; returns the new title and URL. Implement it if D2 includes `driver-handles` or D9 = yes.
@@ -733,10 +733,10 @@ git commit -m "feat: driver and COM backends with per-call target; integration r
     - refuses `main` windows ("use ie_close"), the top window of an attached tab ("use ie_detach"), and `system_dialog` windows ("system dialog: ask the user");
     - for `hwnd:` targets: `parentWindow.close()` over COM if D2 includes `com`, else Win32 `PostMessage(WM_CLOSE)`;
     - for driver handles: switch to it, close it, and switch back to main.
-  - **`ie_dialog`** gains `target`. With `target="hwnd:<n>"` it is `needs_driver=False`, skips the driver's alert and acts only on that window. Without a target, the order of attempts is:
-    - the driver alert (`switch_to.alert`);
-    - else, for a `script_dialog` window, `action="text"` returns its static text (child `Static` controls). `accept`/`dismiss` send `WM_COMMAND` with the button IDs recorded in Q8, only after confirming the window: its owner is a session window (`main_hwnd`, a popup or an `html_dialog`) or its owner chain reaches an attached tab's top window, **and** its class and button IDs match the script-dialog shape recorded in Q8. An alert raised inside a `showModalDialog` window is owned by that dialog, so it qualifies. (Task 12 adds a matching `dialog-open` record to the result as extra evidence; it is not required.)
-    - `system_dialog` windows are refused.
+  - **`ie_dialog`** gains `target`.
+    - **Window path.** For a `script_dialog` window, `action="text"` returns its static text (child `Static` controls); `accept`/`dismiss` send `WM_COMMAND` with the button IDs recorded in Q8. Before any of these, the window is confirmed: its owner is a session window (`main_hwnd`, a popup or an `html_dialog`) or its owner chain reaches an attached tab's top window, **and** its class and button IDs match the script-dialog shape recorded in Q8. An alert raised inside a `showModalDialog` window is owned by that dialog, so it qualifies. `system_dialog` windows, and windows that fail the confirmation, are refused and nothing is sent. (Task 12 adds a matching `dialog-open` record to the result as extra evidence; it is not required.)
+    - **With `target="hwnd:<n>"`** it is `needs_driver=False`, skips the driver's alert and takes the window path for that window only. While attached to a tab (Task 15) the no-target form is refused because it needs the driver, so alerts there are handled with the `hwnd:` target that `ie_windows` lists.
+    - **Without a target**, it tries the driver alert (`switch_to.alert`) first, then the window path for a `script_dialog` that `MODAL_PROBE` reports.
   - **The `NOTICE:` text** (Task 6) recommends the D2 path first: `ie_switch_window` or `target="hwnd:<n>"`.
 
 - [ ] **Step 1: Write the failing unit tests**
@@ -748,6 +748,8 @@ def test_windows_tool_skips_driver_while_modal_open(self)  # probe non-empty -> 
 def test_close_window_hwnd_prefers_com_then_wm_close(self) # COM fails -> PostMessage(WM_CLOSE) called
 def test_close_window_refuses_main(self)                 # kind main -> isError containing "ie_close"
 def test_system_dialog_never_clicked(self)               # ie_dialog/ie_close_window on system_dialog -> isError containing "ask the user"; no message sent
+def test_dialog_hwnd_target_needs_no_driver(self)       # REGISTRY["ie_dialog"].needs_driver({"target": "hwnd:1"}) is False; needs_driver({}) is True
+def test_dialog_hwnd_target_refuses_unconfirmed(self)   # hwnd target owned by a window outside the session and attached tabs, or with button IDs unlike Q8 -> isError; no message sent
 ```
 
 - [ ] **Step 2: Write the integration tests.** Use the D2 path(s). If D2 is `both`, run the modal tests once per path with `subTest`.
@@ -973,7 +975,7 @@ git commit -m "feat: streaming recording proxy with document-only, mode-safe loa
 - Test: `tests/test_console.py`, `tests/integration/it_console.py`
 
 **Interfaces:**
-- Consumes: `POST_HOOKS`, `MODAL_PROBE` (Task 6); `ComBackend` (Task 8); `Redactor`, `CaptureStore` (Task 10); D3 and D5 (Task 2).
+- Consumes: `POST_HOOKS`, `AFTER_CALL`, `MODAL_PROBE` (Task 6); `ComBackend`, `backends.DEFAULT_TARGET` (Task 8); `Redactor`, `CaptureStore` (Task 10); D3 and D5 (Task 2).
 - Produces:
   - **`instrument.js`** is ES3 and idempotent through `window.__iemcp`. It keeps a queue `window.__iemcp.q` of records `kind\x1flevel\x1ftime\x1ftext` (separators inside text escaped as `\\x1e`/`\\x1f`). It records:
     - **`error`:** from `window.onerror`, chained to any existing handler, keeping its return value. The wrapper carries the marker `__iemcp = 1`; if the page later replaces `window.onerror`, the post-hook re-chains it;
@@ -1199,7 +1201,7 @@ git commit -m "feat: DPI-aware window screenshots including modal dialogs"
 
 **Files:**
 - Create: `ie_mcp/tools/attach.py`
-- Modify: `ie_mcp/win32/windows.py`, `ie_mcp/protocol.py` (refuse driver tools while attached), `ie_mcp/tools/windows.py` and `ie_mcp/tools/read.py` (attached top in `ie_windows` and `scope=window`)
+- Modify: `ie_mcp/win32/windows.py`, `ie_mcp/protocol.py` (refuse driver tools while attached). `ie_windows` (Task 9) and `ie_screenshot scope=window` (Task 14) already read `ATTACHED_TOPS`; this task only fills it.
 - Test: `tests/test_attach.py`, `tests/integration/it_attach.py`
 
 **Interfaces:**
@@ -1223,8 +1225,9 @@ def test_attach_sets_and_detach_clears_default_target(self)  # also ATTACHED_TOP
 def test_driver_tools_refused_while_attached(self)         # DEFAULT_TARGET "tab:5"; ie_wait_ready -> isError containing "ie_detach"; SESSION.ensure not called
 def test_resolve_tab_target_uses_com_backend(self)
 # integration
-def test_attach_reads_ie_mode_tab(self)                     # ie_open form.htm; ie_tabs lists it; ie_attach(hwnd); ie_text frame "inner" (no target) contains "Inner frame";
-                                                            # click send in the tab (exercises re-injection after navigation); on the /echo page run, with no target,
+def test_attach_reads_ie_mode_tab(self)                     # restart_session(IE_CAPTURE="0"), so no proxy loader is inserted; ie_open form.htm; ie_tabs lists it; ie_attach(hwnd);
+                                                            # ie_text frame "inner" (no target) contains "Inner frame"; click send in the tab; ie_wait_text "Echo" (no target),
+                                                            # whose AFTER_CALL drain re-injects instrument.js into the new /echo document; then, with no target,
                                                             # ie_js "window.setTimeout(function(){throw new Error('tab-late-error');},0);return 1", then ie_sleep seconds=1;
                                                             # ie_console has an error record containing "tab-late-error" whose where startswith "tab:"; ie_detach
 ```

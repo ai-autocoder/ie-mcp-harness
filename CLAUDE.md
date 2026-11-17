@@ -216,9 +216,8 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
   of the doctype. From the anchor, skip whitespace, comments, and `<meta>`, `<title>` and
   `<base>` elements, then insert. A document whose first tag is `<body` gets the loader right
   before `<body`; one whose first tag is `<frameset` gets nothing. Match tags
-  case-insensitively. A tag name needs a delimiter
-  after it (`<head` is not `<header`), a `>` inside a quoted attribute does not end a tag, and
-  tags inside comments are ignored.
+  case-insensitively. A tag name needs a delimiter after it (`<head` is not `<header`), a `>`
+  inside a quoted attribute does not end a tag, and tags inside comments are ignored.
   - IE ignores an `X-UA-Compatible` meta that comes after a script, which would change the
     document mode.
   - Never insert before the doctype or a byte-order mark.
