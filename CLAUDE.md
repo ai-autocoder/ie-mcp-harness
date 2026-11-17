@@ -27,7 +27,7 @@ Chromium automation tool gives on a modern page, **without changing how the page
 [docs/superpowers/specs/2026-11-17-ie-mode-harness-design.md](docs/superpowers/specs/2026-11-17-ie-mode-harness-design.md)
 and the task-by-task implementation plan is in
 [docs/superpowers/plans/2026-11-17-ie-mode-harness.md](docs/superpowers/plans/2026-11-17-ie-mode-harness.md).
-Work through the plan in order. Task 2 is a spike whose recorded decisions (D1–D8) select
+Work through the plan in order. Task 2 is a spike whose recorded decisions (D1–D13) select
 variants in later tasks; do not skip it.
 
 ## Golden rule: keep it generic
@@ -89,15 +89,16 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 # integration tests: open a real, visible IE-mode window; need an unlocked desktop.
 # Files are tests/integration/it_*.py. The runner sets IE_MCP_INTEGRATION=1 itself and
-# FAILS if any test was skipped (from plan Task 7).
+# FAILS if any test was skipped (from plan Task 8).
 python scripts/run_integration.py            # all
 python scripts/run_integration.py it_modal   # one module
 
 # serve the fixture site by hand; prints the base URL (from plan Task 1)
 python -m ie_mcp_fixtures
 
-# check the setup end to end
-ie-mcp --selftest            # after plan Task 3; before that: python ie_mcp.py --selftest
+# check the setup end to end. Until plan Task 4 the selftest clears your IE-mode cookies and
+# cache (upstream forces ensure_clean_session); the plan avoids running it before then.
+ie-mcp --selftest            # needs `pip install -e .`; or: python ie_mcp.py --selftest before plan Task 3
 
 # register a dev copy with Claude Code for manual testing (after plan Task 3)
 claude mcp add ie-mcp-dev -e IE_INTERACTION_MODE=background -- python -m ie_mcp
@@ -123,20 +124,20 @@ ie_mcp/
   backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); resolve_backend
   png.py             encode_png (stdlib zlib)
   win32/
-    processes.py     Toolhelp32 process snapshot (ctypes), process tree
+    processes.py     process_identity (image + creation time), Toolhelp32 snapshot, process tree
     windows.py       window enumeration and classification, modal_probe, ie_mode_tabs
-    htmldoc.py       com_apartment, ie_server_child, document_from_hwnd (pywin32)
+    htmldoc.py       com_apartment, com_call (retries rejected calls), ie_server_child, document_from_hwnd (pywin32)
     capture.py       PrintWindow capture, DPI awareness
   capture/
     store.py         NetworkEntry, CaptureStore
-    redact.py        Redactor (field/header regexes, value masking)
-    proxy.py         RecordingProxy, inject_into_html
+    redact.py        Redactor (name-segment matching, value masking)
+    proxy.py         RecordingProxy, loader_tag, is_document_request, find_insertion_point
     console.py       ConsoleRecord, ConsoleStore, parse_records
-  js/                ES3 scripts: select.js, grid.js, ready_probe.js, frames.js, instrument.js, drain.js
+  js/                ES3 scripts: select.js, grid.js, ready_probe.js, frames.js, instrument.js, hook.js, drain.js
   tools/             navigation.py, read.py, interact.py, dialogs.py, windows.py, network.py,
                      console.py, attach.py, diagnostics.py
 ie_mcp_fixtures/
-  server.py          start_fixture_server (two origins), python -m ie_mcp_fixtures
+  server.py          start_fixture_server (origins 127.0.0.1 and localhost), requests log, python -m ie_mcp_fixtures
   site/              legacy fixture pages
 scripts/
   spike_ie_mode.py   plan Task 2 diagnostic
@@ -146,20 +147,28 @@ tests/
   integration/       it_*.py real IE-mode tests against the fixture site
 ```
 
-Key design points:
+Key design points. These describe the **target state** the plan builds; until a task lands,
+the upstream code behaves as before:
 
 - **One MCP process owns one long-lived Selenium session** (frame-based apps lose state if the
   session is recreated). Parallel agents use different `IE_SESSION_ID`s.
 - **Two backends.** `DriverBackend` (Selenium) is the default. `ComBackend` reaches an IE
   document directly through `WM_HTML_GETOBJECT` on its `Internet Explorer_Server` window. It
-  serves modal dialogs the driver cannot reach and tabs the user opened. Every COM call runs
-  inside `com_apartment()`; never keep a COM object across tool calls or threads.
-- **No tool call may hang the server.** Every tool runs under a watchdog with a per-call
-  budget; the driver lock is acquired with that budget; `ie_close(force=true)` kills only this
-  session's own Edge and IEDriver by recorded PID. Window and dialog tools work without the
-  driver.
-- **Network capture** comes from a local recording proxy that only the IE-mode browser process
-  uses. It is checked at session start and reported as off when the browser did not use it.
+  serves modal dialogs the driver cannot reach and tabs the user opened.
+- **COM lifetime.** The tool-call worker thread enters one COM apartment (`com_apartment()`)
+  for the whole call. A `ComBackend` is created per call, and **no COM object outlives the tool
+  call**. Read COM expandos with `getattr(win, "__iemcp_r")`, because Python mangles `__names`
+  written inside a class.
+- **No tool call may hang the server.** `handle()` and `serve()` both go through the
+  `run_tool` watchdog, with a per-call budget. The driver lock is acquired with that budget.
+  `ie_close(force=true)` cancels running wait loops and kills only this session's own Edge and
+  IEDriver, after checking their identity. Window and dialog tools work without the driver.
+- **Post-call instrumentation** is one `execute_script` from the top document that walks the
+  same-origin frames in JS. It holds the driver lock until it returns, and it is skipped while
+  a dialog is open or after an async click.
+- **Network capture** comes from a streaming local recording proxy that only the IE-mode
+  browser process uses. It is verified on the first http(s) navigation and reported as
+  unverified or off otherwise.
 
 ## Trident rules for injected JavaScript
 
@@ -186,14 +195,37 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 
 ## Injection rules (proxy)
 
-- Insert the script **after** the leading run of `<meta>`, `<title>` and `<base>` elements
-  inside `<head>`. IE ignores an `X-UA-Compatible` meta that comes after a script, which would
-  change the document mode.
-- Without a `<head>`, insert after the `<html …>` tag; without that, after the doctype. Never
-  insert before the doctype or before a byte-order mark.
-- On every modified response, drop `ETag`/`Last-Modified` and set `Cache-Control: no-store`,
-  so injected copies never land in the per-user WinINet cache that the user's own IE-mode
-  browsing shares.
+- **What gets inserted.** Only a tiny loader:
+  `<script type="text/javascript" src="http://<document host:port>/__iemcp__/i.js"></script>`.
+  The URL is absolute, so a `<base href>` cannot redirect it. The proxy answers `/__iemcp__/`
+  itself, on any host; it is never forwarded and never recorded. `i.js` removes its own
+  `<script>` element when it runs, so the DOM matches the original. Keeping the insert small
+  keeps a late `<meta charset>` inside IE's charset prescan.
+- **Only into documents requested as pages.** Inject only when both hold:
+  - the request is a document request (per spike D10, an `Accept` header containing
+    `text/html`);
+  - the response is `text/html` 200 whose first tag (after an optional UTF-8 BOM, whitespace
+    and comments) is a doctype or `<html`, `<head`, `<body` or `<frameset`.
+
+  Never inject into fragments or plain text, even with a `text/html` content type: legacy XHR
+  endpoints often return those, and their `responseText` must stay byte-identical. Also skip
+  UTF-16 bodies, attachments, HEAD/204/304 responses, and head-less framesets (the post-call
+  hook instruments those after load).
+- **Where.** Find the anchor: the end of `<head …>`, else the end of `<html …>`, else the end
+  of the doctype. From the anchor, skip whitespace, comments, and `<meta>`, `<title>` and
+  `<base>` elements, then insert. Match tags case-insensitively. A tag name needs a delimiter
+  after it (`<head` is not `<header`), a `>` inside a quoted attribute does not end a tag, and
+  tags inside comments are ignored.
+  - IE ignores an `X-UA-Compatible` meta that comes after a script, which would change the
+    document mode.
+  - Never insert before the doctype or a byte-order mark.
+- **Caching.** On every modified response, drop `ETag`/`Last-Modified` and set
+  `Cache-Control: no-store`, so injected copies never land in the per-user WinINet cache that
+  the user's own IE-mode browsing shares.
+- **Streaming.** Stream every response. For a document that may get the loader, buffer while
+  `find_insertion_point` says `NEED_MORE` (at most 64 KB). An insertion point is final only
+  once the first tag after the skipped run has fully arrived, so a head split across packets
+  can never put the loader before an `X-UA-Compatible` meta.
 
 ## Known IE-mode / IEDriver quirks
 
@@ -206,9 +238,12 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
   silently cancels an open alert/confirm. Plan Task 4 sets `ignore`.
 - A WebDriver click whose handler opens `alert`/`confirm`/`showModalDialog` can block until the
   dialog closes.
-- The `proxy` capability's `noProxy` must be a **list** (`["<-loopback>"]`); a string fails
-  session creation. Without `use_per_process_proxy=True` IEDriver writes the user's global
-  WinINet proxy settings; never build a proxy capability without it.
+- Pass the `proxy` capability's `noProxy` as a **list** (`["<-loopback>"]`). IEDriver rejects a
+  string; selenium's `Proxy` class converts strings, but raw capability dicts do not. Without
+  `use_per_process_proxy=True`, IEDriver writes the user's global WinINet proxy settings; never
+  build a proxy capability without it.
+- Selenium's HTTP client to the driver has no timeout by default. Set one (plan Task 4), or a
+  dead driver hangs the calling thread forever.
 - If the per-process proxy hook fails, IEDriver only logs "Proxy will not be set!"; the session
   must verify that the proxy saw traffic.
 - `ensure_clean_session=True` clears the user's whole IE-mode cookie store and cache, not only
@@ -222,16 +257,23 @@ Write a code comment for every new quirk you work around; they are rarely obviou
 - Never write the registry, change system, proxy, firewall or Edge settings, or install
   certificates. The only exception is upstream's opt-in `IE_SITE_LIST` policy writer.
 - Only kill processes proven to belong to this server: this session's own recorded PIDs, or a
-  dead session's PIDs matched by Edge profile.
+  dead session's PIDs matched by Edge profile. Either way, the recorded image name and creation
+  time must still match (`kill_verified`), because Windows reuses PIDs. A process with no
+  recorded identity is never killed, and `taskkill` runs without `/T`. Process trees built
+  from parent PIDs are fine for listing, never for killing.
 - Never click, accept or dismiss a **system dialog** (file open/save, print, security or
   ActiveX prompts, credential prompts, "leave this page?"). Report it and let the user act.
   Only script alerts the session can attribute to itself are handled.
 - No outbound network calls of the server's own. The proxy only forwards the browser's traffic
   (directly, or to `IE_CAPTURE_UPSTREAM_PROXY` when set).
-- Captured traffic, console records and screenshots stay in memory or in the session directory
-  under `%TEMP%\ie-mcp\sessions\<id>`; disk copies are deleted on close unless
-  `IE_KEEP_ARTIFACTS=1`. Redaction is on by default and masks every value it has redacted once,
-  wherever it appears again. Never commit captured data.
+- Captured traffic and console records stay in memory. A JSONL copy is written only with
+  `IE_CAPTURE_JSONL=1`, and is deleted on close unless `IE_KEEP_ARTIFACTS=1`. Screenshots saved
+  by name go to the session's `screenshots` folder and are kept. Never commit captured data.
+- Redaction is on by default. It matches field and header names by word segment, plus
+  substrings for password-like names (so `lastName`, `compass` and `keyword` stay visible, while
+  `newpassword` and `USERPWD` are caught). It masks every non-trivial value it has redacted
+  once, wherever it appears again (short values only as whole tokens): bodies, URLs, console
+  text, dialog summaries and the server log.
 - File access from tools (upload, `save_path`) is confined to configured directories.
 - `ie_tabs`/`ie_attach` never list or attach to windows owned by another live ie-mcp session.
 
