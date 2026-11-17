@@ -1,0 +1,80 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head><title>Fixture lookup dialog</title><meta http-equiv="X-UA-Compatible" content="IE=7">
+<base target="_self">
+<script type="text/javascript">
+var args = window.dialogArguments;
+
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (typeof el.innerText != 'undefined') { el.innerText = text; } else { el.textContent = text; }
+}
+
+function loadXml() {
+  var x = new ActiveXObject('Microsoft.XMLHTTP');
+  x.open('GET', '/api/lookup.xml?q=', false);
+  x.send(null);
+  var doc = x.responseXML;
+  if (!doc || !doc.documentElement) {
+    // MSXML leaves responseXML empty when it does not recognise the content
+    // type; parse the text instead.
+    doc = new ActiveXObject('Microsoft.XMLDOM');
+    doc.async = false;
+    doc.loadXML(x.responseText);
+  }
+  return doc;
+}
+
+function pick(code, name) {
+  if (args) {
+    args.sCode = code;
+    args.sName = name;
+  }
+  window.close();
+}
+
+function makePicker(code, name) {
+  return function () { pick(code, name); return false; };
+}
+
+function buildGrid() {
+  var items = loadXml().getElementsByTagName('item');
+  var table = document.getElementById('lookup_grid');
+  for (var i = 0; i < items.length; i++) {
+    var code = items[i].getAttribute('code');
+    var name = items[i].getAttribute('name');
+    var row = table.insertRow(-1);
+    var cell = row.insertCell(-1);
+    var link = document.createElement('a');
+    link.id = 'pick_' + code;
+    link.href = '#';
+    link.onclick = makePicker(code, name);
+    link.appendChild(document.createTextNode(code));
+    cell.appendChild(link);
+    row.insertCell(-1).appendChild(document.createTextNode(name));
+  }
+}
+
+function openNested() {
+  var r = window.showModalDialog('modal_nested.htm', null, 'dialogWidth:300px;dialogHeight:200px');
+  setText('nested_result', (r === undefined || r === null) ? '' : String(r));
+}
+
+window.onload = function () {
+  setText('has_args', args ? 'yes' : 'no');
+  buildGrid();
+};
+</script>
+</head>
+<body>
+<h3>Lookup</h3>
+<p>Dialog arguments: <span id="has_args"></span></p>
+<table id="lookup_grid" border="1">
+<tr><th>Code</th><th>Name</th></tr>
+</table>
+<p>
+<input type="button" id="nested" name="nested" value="Nested..." onclick="openNested()">
+Nested result: <span id="nested_result"></span>
+</p>
+</body>
+</html>

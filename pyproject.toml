@@ -4,14 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ie-mcp"
-version = "0.1.0"
+version = "0.2.0.dev0"
 description = "MCP server that drives Microsoft Edge in IE mode (Trident) via the Selenium IEDriver — automate legacy IE-only web apps from any MCP client."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "thomfilg" }]
 keywords = ["mcp", "ie-mode", "internet-explorer", "edge", "selenium", "automation"]
 dependencies = ["selenium>=4.14.0,<5"]
+
+[project.optional-dependencies]
+# COM access to IE documents (modal dialogs, user-opened tabs). Optional:
+# the server starts and lists its tools without it.
+win32 = ["pywin32>=306"]
 
 [project.urls]
 Homepage = "https://github.com/thomfilg/ie-mcp"
@@ -23,3 +28,8 @@ ie-mcp = "ie_mcp:main"
 
 [tool.setuptools]
 py-modules = ["ie_mcp"]
+# Legacy fixture site, shipped so `--selftest` works from a pip install.
+packages = ["ie_mcp_fixtures"]
+
+[tool.setuptools.package-data]
+ie_mcp_fixtures = ["site/*"]

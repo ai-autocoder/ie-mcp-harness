@@ -1,0 +1,29 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head><title>Fixture modal opener</title><meta http-equiv="X-UA-Compatible" content="IE=7">
+<script type="text/javascript">
+function openLookup() {
+  var o = {sCode: '', sName: ''};
+  window.showModalDialog('modal_dialog.htm', o, 'dialogWidth:420px;dialogHeight:320px');
+  if (o.sCode != '') {
+    document.getElementById('lookup_code').value = o.sCode;
+    document.getElementById('lookup_name').value = o.sName;
+  }
+}
+function doAsk() {
+  var r = window.showModalDialog('modal_confirm.htm', {question: 'Proceed?'}, 'dialogWidth:320px;dialogHeight:200px');
+  document.getElementById('answer').value = (r === undefined || r === null) ? '' : String(r);
+}
+</script>
+</head>
+<body>
+<h3>Modal opener</h3>
+<table>
+<tr><td><label for="lookup_code">Code</label></td><td><input type="text" id="lookup_code" name="lookup_code"></td></tr>
+<tr><td><label for="lookup_name">Name</label></td><td><input type="text" id="lookup_name" name="lookup_name"></td></tr>
+<tr><td><label for="answer">Answer</label></td><td><input type="text" id="answer" name="answer"></td></tr>
+</table>
+<input type="button" id="open_lookup" name="open_lookup" value="Lookup..." onclick="openLookup()">
+<input type="button" id="ask" name="ask" value="Ask..." onclick="doAsk()">
+</body>
+</html>

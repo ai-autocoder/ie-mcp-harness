@@ -1,0 +1,30 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<title>Fixture grid</title>
+<script type="text/javascript">
+var ROWS = [['A1', 'Alpha', '1.00'], ['B2', 'Beta', '2.50'], ['C3', 'Gamma', '10.00']];
+
+function fillGrid() {
+  var body = document.getElementById('grid_body');
+  for (var i = 0; i < ROWS.length; i++) {
+    var row = body.insertRow(-1);
+    for (var j = 0; j < ROWS[i].length; j++) {
+      row.insertCell(-1).appendChild(document.createTextNode(ROWS[i][j]));
+    }
+  }
+}
+
+window.onload = function () {
+  setTimeout(fillGrid, 1500);
+};
+</script>
+</head>
+<body>
+<h3>Grid</h3>
+<table id="grid" border="1">
+<thead><tr><th>Code</th><th>Name</th><th>Price</th></tr></thead>
+<tbody id="grid_body"></tbody>
+</table>
+</body>
+</html>

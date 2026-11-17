@@ -38,7 +38,7 @@ product, customer, intranet or site:
 - no real hostnames, URLs, screen names, field names, credentials, or captured data;
 - no tool, default or heuristic tuned to one application;
 - examples and tests use only the fixture site in `ie_mcp_fixtures/site/`, served from
-  `127.0.0.1` (from plan Task 1).
+  `127.0.0.1`.
 
 If a feature is only useful for one application, it belongs in that application's own
 tooling, not here.
@@ -62,8 +62,8 @@ The spec's "Fidelity" table is the list. Add a row whenever you add a modificati
 | OS | Windows 10/11 with an unlocked, interactive desktop (IE mode is never headless) |
 | Edge | Microsoft Edge with IE mode available |
 | IEDriverServer | Official Selenium IE driver, **32-bit (Win32) 4.14.0** recommended. Set `IE_DRIVER_PATH`. Automatic discovery in the per-user Selenium cache arrives in plan Task 4; until then upstream hardcodes a path that will not exist on your machine |
-| Python | **3.10+** (current selenium requires it; the development machine runs 3.14). `pyproject.toml` still says 3.8 until plan Task 1 |
-| Runtime deps | `selenium>=4.14.0,<5` only. `pywin32` becomes the optional extra `.[win32]` in plan Task 1 |
+| Python | **3.10+** (current selenium requires it; the development machine runs 3.14). |
+| Runtime deps | `selenium>=4.14.0,<5` only. Optional extra `.[win32]` adds `pywin32>=306` (COM backend); the server runs without it |
 
 IEDriver launches Edge with `--ie-mode-force`. Plan Task 2 confirms on this machine that the
 fixture pages then render in IE mode (Trident userAgent and the expected `documentMode`). Until
@@ -81,7 +81,7 @@ equivalents are given where they differ. Never use `set VAR=1 && …` (that is c
 bash it sets positional parameters, in Windows PowerShell 5.1 `&&` is a parse error).
 
 ```bash
-# install editable, with the optional Win32 extra (after plan Task 1 adds the extra)
+# install editable, with the optional Win32 extra
 pip install -e ".[win32]"
 
 # unit tests: no browser, run anywhere on Windows. Files are tests/test_*.py
@@ -93,7 +93,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 python scripts/run_integration.py            # all
 python scripts/run_integration.py it_modal   # one module
 
-# serve the fixture site by hand; prints the base URL (from plan Task 1)
+# serve the fixture site by hand; prints both origins (--host, --port, --alt-port)
 python -m ie_mcp_fixtures
 
 # check the setup end to end
