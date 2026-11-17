@@ -154,7 +154,8 @@ the upstream code behaves as before:
   session is recreated). Parallel agents use different `IE_SESSION_ID`s.
 - **Two backends.** `DriverBackend` (Selenium) is the default. `ComBackend` reaches an IE
   document directly through `WM_HTML_GETOBJECT` on its `Internet Explorer_Server` window. It
-  serves modal dialogs the driver cannot reach and tabs the user opened.
+  serves modal dialogs the driver cannot reach and tabs the user opened. Wait loops re-read
+  the document before every poll, and a tab's server window is found again after a navigation.
 - **COM lifetime.** The tool-call worker thread enters one COM apartment (`com_apartment()`)
   for the whole call, and every hook sub-thread enters its own. A `ComBackend` is created per
   call (or per hook thread), and **no COM object outlives the thread that obtained it**. The
