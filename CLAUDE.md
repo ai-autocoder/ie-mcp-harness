@@ -156,8 +156,9 @@ the upstream code behaves as before:
   document directly through `WM_HTML_GETOBJECT` on its `Internet Explorer_Server` window. It
   serves modal dialogs the driver cannot reach and tabs the user opened.
 - **COM lifetime.** The tool-call worker thread enters one COM apartment (`com_apartment()`)
-  for the whole call. A `ComBackend` is created per call, and **no COM object outlives the tool
-  call**. Read COM expandos with `getattr(win, "__iemcp_r")`, because Python mangles `__names`
+  for the whole call, and every hook sub-thread enters its own. A `ComBackend` is created per
+  call (or per hook thread), and **no COM object outlives the thread that obtained it**. The
+  modal probe is Win32-only and never touches COM. Read COM expandos with `getattr(win, "__iemcp_r")`, because Python mangles `__names`
   written inside a class.
 - **No tool call may hang the server.** `handle()` and `serve()` both go through the
   `run_tool` watchdog, with a per-call budget. The driver lock is acquired with that budget.

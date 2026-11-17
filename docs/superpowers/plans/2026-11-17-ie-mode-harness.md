@@ -21,7 +21,7 @@ Verify everything against a generic fixture site shipped as `ie_mcp_fixtures`.
 This revision supersedes revision 2 (commit `c298960`) after a second design review. If you are a session already working from revision 2:
 
 - Task 1 is done (`fe27706`). **Task 1b** adds fixture pages and endpoints that later tasks need; do it before Task 2.
-- **Task 2 (spike)** has more questions and decisions D9–D12. If Task 2 already ran under revision 2, run only the added parts and extend the decision record (now D1–D13). The added parts:
+- **Task 2 (spike)** has more questions and decisions D9–D13. If Task 2 already ran under revision 2, run only the added parts and extend the decision record (now D1–D13). The added parts:
   - Q2: popups;
   - Q0: a Trident check that does not clear cookies;
   - Q3: COM threading, rejected calls and key input;
@@ -120,7 +120,7 @@ Task 1b adds what revision 3 of this plan asks for on top.
   - **The other origin uses another host name.** `FixtureServer.alt_base_url` becomes `http://localhost:<alt_port>/`, because IE's same-origin rule ignores ports, so a different port alone is not a second origin for IE. The alt port gets listeners on `127.0.0.1` and, when IPv6 loopback is available, on `::1` (same port). `base_url` is unchanged (`http://<host>:<port>/`).
   - **`GET /fragment`:** `Content-Type: text/html`, body exactly `OK|A1` (no tags).
   - **`GET /big?ms=N`:** a 1,048,576-byte `text/plain` body written in 8 KB writes spread over N ms (with `Content-Length`; the first write happens immediately).
-  - **`GET /progressive?ms=N`:** a `text/html` IE7 document whose head is flushed in separate small writes: `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><html><head><title>progressive</title>`, then `<meta http-equiv="X-UA-Compatible" content="IE=7">`, then `<link rel="stylesheet" href="data:text/css,">`. The rest (`</head><body>progressive ok</body></html>`) follows after N ms.
+  - **`GET /progressive?ms=N`:** a `text/html` IE7 document whose head is flushed in separate small writes: `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"><html><head><title>progressive</title>`, then `<meta http-equiv="X-UA-Compatible" content="IE=7">`, then `<link rel="stylesheet" href="data:text/css,">`, with about 50 ms between these writes and `TCP_NODELAY` set, so a reader sees them as separate reads. The rest (`</head><body>progressive ok</body></html>`) follows after N ms.
   - **`FixtureServer.requests`:** a thread-safe list of `RequestRecord(method: str, path: str, headers: dict[str, str], conn_id: int)` for every request either listener received (`conn_id` identifies the client TCP connection), plus `clear_requests() -> None`.
   - **`xorigin.htm`**'s comment no longer says "same host, other port".
   - **New pages:**
@@ -131,7 +131,7 @@ Task 1b adds what revision 3 of this plan asks for on top.
 | `headless.htm` | `<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">` then `<html><meta http-equiv="X-UA-Compatible" content="IE=7"><title>headless</title><body>headless ok</body></html>` (no `<head>` tag) |
 | `latecharset.htm` | Encoded as `windows-1252`; the head contains `<link rel="stylesheet" href="data:text/css,">` and a short inline `<script>` **before** `<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">`; text `Müller – café` |
 
-  - **`modal_dialog.htm`** gains input `search` (id = name). An `onkeypress` handler, on Enter (keyCode 13), reloads the list from `/api/lookup.xml?q=<search value>` and writes the number of rows into `search_count`. `loadXml()` takes the `q` value as a parameter. It also gains input `typed`, whose `onkeypress` handler increments the number in `keypress_count` (starting at 0) and appends the typed character to `typed_chars`.
+  - **`modal_dialog.htm`** gains input `search` (id = name). An `onkeypress` handler, on Enter (keyCode 13), reloads the list from `/api/lookup.xml?q=<search value>` and writes the number of rows into `search_count`. `loadXml()` takes the `q` value as a parameter. It also gains input `typed`, whose `onkeypress` handler increments the number in `keypress_count` (starting at 0) and appends the typed character to `typed_chars`. It also gains button `dialog_alert`, which runs `alert('Dialog alert')` and then writes `alerted` into `dialog_alert_result`.
   - **`xhr.htm`** gains button `load_fragment`: GET `/fragment` via `new ActiveXObject('Microsoft.XMLHTTP')` (fallback `XMLHttpRequest`), writing `responseText` into `fragment_result`.
   - **`index.htm`** links the three new pages and gains the same `typed` input with `keypress_count` and `typed_chars` (an IE11-mode document for the spike's key test).
 
@@ -145,8 +145,9 @@ def test_alt_origin_uses_other_host(self)         # alt_base_url startswith "htt
 def test_new_pages_served(self)                   # nomode.htm contains "no mode meta" and no "X-UA-Compatible"; headless.htm has no "<head";
                                                   # latecharset.htm bytes contain b"M\xfcller" and "<script" occurs before "charset=windows-1252"
 def test_dialog_and_xhr_pages_have_new_controls(self)  # modal_dialog.htm contains 'id="search"' and 'id="search_count"'; xhr.htm contains 'id="load_fragment"' and 'id="fragment_result"';
-                                                  # modal_dialog.htm and index.htm contain 'id="typed"' and 'id="keypress_count"'
-def test_requests_are_recorded(self)               # GET /fragment with header X-Test: 1 -> requests[-1].method == "GET", .path == "/fragment", .headers["X-Test"] == "1"; clear_requests() empties it
+                                                  # modal_dialog.htm and index.htm contain 'id="typed"' and 'id="keypress_count"'; modal_dialog.htm contains 'id="dialog_alert"'
+def test_requests_are_recorded(self)               # GET /fragment with header X-Test: 1 -> requests[-1].method == "GET", .path == "/fragment", .headers["X-Test"] == "1"; clear_requests() empties it;
+                                                  # two requests on one keep-alive http.client connection share a conn_id; a new connection gets a different one
 def test_progressive_endpoint_flushes_head_early(self)  # GET /progressive?ms=800 -> the bytes up to and including the X-UA meta are read before 500 ms; the full body after
 ```
 
@@ -203,7 +204,7 @@ git commit -m "test: fixture additions for plan revision 3 (fragment, big, mode 
 - D4 = `bypassed`, and `http://127.0.0.2:<port>/` is bypassed too. The only other route is serving fixtures on a LAN address, which triggers a firewall prompt; the user decides.
 - Q6 shows the loader changing any document mode or charset.
 
-The spike script uses raw Selenium plus ctypes/pywin32, not the server. Every spike session sets `ensure_clean_session = False` explicitly (upstream's default clears the user's IE-mode cookies and cache). It prints one `Qn:` line per question with its evidence. It always runs `driver.quit()` and kills its own Edge (by Edge profile) in `finally`. Each question that needs a fresh session quits the previous one first. The proxy it uses for Q4 and Q6 is a minimal stdlib logging proxy that can optionally insert `<script src="/__iemcp__/i.js"></script>` (and answer that path with `window.__inj=1`) using the placement rule from CLAUDE.md "Injection rules".
+The spike script uses raw Selenium plus ctypes/pywin32, not the server. Every spike session sets `ensure_clean_session = False` explicitly (upstream's default clears the user's IE-mode cookies and cache). It prints one `Qn:` line per question with its evidence. It always runs `driver.quit()` and kills its own Edge (by Edge profile) in `finally`. Each question that needs a fresh session quits the previous one first. The proxy it uses for Q4 and Q6 is a minimal stdlib logging proxy that can optionally insert the same tag the product ships, `<script type="text/javascript" src="http://<document host:port>/__iemcp__/i.js"></script>` (and answer that path with `window.__inj=1`), using the placement rule from CLAUDE.md "Injection rules". Q6 (c) must use exactly that tag, because the charset prescan of `latecharset.htm` depends on its length.
 
 - [ ] **Step 1: Prepare the driver**
 
@@ -493,17 +494,17 @@ git commit -m "fix: lease handling, identity-checked process killing, cancellabl
     - `ie_wait_ready`, `ie_wait_text`, `ie_wait_element`: `timeout + interval + 15`;
     - locator tools: `timeout + wait + 15`;
     - `ie_sleep`: `seconds + 5`.
-  - **`protocol.CALL_CONTEXTS: list[Callable[[], ContextManager]]`:** empty here; Task 7 appends `com_apartment`. The worker enters all of them around the whole call (tool, hooks, notices).
+  - **`protocol.CALL_CONTEXTS: list[Callable[[], ContextManager]]`:** empty here; Task 7 appends `com_apartment`. The worker enters all of them around the whole call (tool, hooks, notices), and **every sub-thread a hook runs in enters them again for itself**. No COM object outlives the thread that obtained it.
   - **`protocol.run_tool(spec: ToolSpec, args: dict) -> dict`:** runs the tool in a daemon worker. For `spec.needs_driver(args)` it first calls `DRIVER_LOCK.acquire(timeout=budget)`.
-    - If the lock cannot be acquired: return `isError` with text `BUSY: <running tool> has held the browser for <n>s`. If `MODAL_PROBE()` is non-empty, return `BLOCKED: modal dialog open …` instead.
+    - If the lock cannot be acquired: return `isError` with text `BUSY: <running tool> has held the browser for <n>s`. If `MODAL_PROBE()` is non-empty, return `BLOCKED: modal dialog open …` instead. `MODAL_PROBE` is Win32-only (no COM), so it is safe on any thread.
     - If the worker exceeds the budget: return `isError` with text `BLOCKED: the browser did not answer within <n>s; the action may still complete`, the probe's windows, and the hints `ie_windows` and `ie_close force=true`. The stuck worker keeps the lock until its call returns.
   - **`handle()` routes every `tools/call` through `run_tool`** and waits for its result. **`serve()`** only adds threading: each `tools/call` is handled on its own thread, and responses are written under a stdout lock. Responses may come back out of order, each with its request `id`.
   - **`protocol.MODAL_PROBE: Callable[[], list[dict]]`:** defaults to `lambda: []`; Task 7 replaces it. After every tool call, if the probe returns windows, a text item is appended: `NOTICE: <kind> open: <title> (hwnd <n>). Use ie_windows; act in it with target="hwnd:<n>" or ie_switch_window.`
   - **`protocol.POST_HOOKS: list[Callable[[ToolSpec, dict, dict], None]]`:** empty here, used by Task 12. They run after a successful driver tool, in the worker, **while the lock is held**, only when `MODAL_PROBE()` is empty and `args.get("mode") != "async"`.
-    - The tool's result is returned after the hooks finish or after 3 s, whichever is first.
-    - The lock is released only when the hooks have returned.
+    - They run in one sub-thread (which enters `CALL_CONTEXTS` itself) and that sub-thread releases `DRIVER_LOCK` when the hooks return. The worker waits for it for at most 3 s, then carries on with `AFTER_CALL` and the notices whether or not the hooks have finished.
+    - So the tool's result is returned after the hooks finish or after about 3 s, and the lock stays held until the hooks have returned.
     - Exceptions are logged and swallowed; the tool's own result is never changed.
-  - **`protocol.AFTER_CALL: list[Callable[[ToolSpec, dict, dict], None]]`:** empty here; Task 12 adds `dialog_drain`. They run after **every** tool call (driver or not), in the worker, inside `CALL_CONTEXTS`, **without** the driver lock, before the notices are appended. Each gets its own 2 s budget (a sub-thread joined for 2 s); exceptions are logged and swallowed.
+  - **`protocol.AFTER_CALL: list[Callable[[ToolSpec, dict, dict], None]]`:** empty here; Task 12 adds `dialog_drain`. They run after **every** tool call (driver or not), in the worker, inside `CALL_CONTEXTS`, **without** the driver lock, before the notices are appended. Each runs in its own sub-thread, which enters `CALL_CONTEXTS` itself and builds its own `ComBackend`s, joined for 2 s; exceptions are logged and swallowed.
   - **`needs_driver=False` tools:** `ie_sleep`, `ie_browsers`, `ie_kill_orphans`. `ie_status` too: it adds `title`/`url` only if `DRIVER_LOCK.acquire(timeout=0.5)` succeeds, else `"driver": "busy"`.
   - **Settings:** `tool_timeout: float` (`IE_TOOL_TIMEOUT`, default 45); `click_mode: str` (`IE_CLICK_MODE`, `driver`|`async`, default from D1 for the active interaction mode).
   - **`ie_click` gains `mode`** (`driver`|`async`, default `config.SETTINGS.click_mode`). `async` runs `execute_script("var e=arguments[0];window.setTimeout(function(){e.click();},0);return 'queued';", el)`. `double`/`right` actions always use the driver. The tool description states that an async click is script-initiated: no mousedown/mouseup/focus, and (per D8) the pop-up blocker may block `window.open`.
@@ -526,6 +527,7 @@ def test_post_hooks_skipped_when_modal_open_or_async(self)  # hook not called wh
 def test_slow_hook_keeps_lock_but_returns_result(self)      # hook sleeps 5s -> result returned within ~3.5s; DRIVER_LOCK still held until the hook ends
 def test_post_hook_failure_does_not_change_result(self)
 def test_after_call_hooks_run_without_lock(self)          # hook sees DRIVER_LOCK unlocked; runs for needs_driver=False tools too; a 5 s hook -> result within ~2.5 s
+def test_hook_threads_enter_call_contexts(self)           # recording context manager is entered in the POST_HOOKS and AFTER_CALL sub-threads, not only in the worker
 def test_status_does_not_wait_for_busy_driver(self)         # lock held -> ie_status returns within 1s with "driver": "busy"
 def test_async_click_uses_settimeout_script(self)           # fake driver: execute_script script contains "setTimeout"; element.click not called
 def test_driver_click_mode_calls_element_click(self)
@@ -566,14 +568,14 @@ git commit -m "feat: tool watchdog with budgets, driver lock, async click and mo
   - **`ProcessRow(pid: int, ppid: int, exe: str)`.**
     - `processes.snapshot() -> list[ProcessRow]` uses `CreateToolhelp32Snapshot`/`Process32FirstW`/`Process32NextW`, cached for 2 s.
     - `processes.process_tree(root_pid: int, rows: list[ProcessRow] | None = None) -> set[int]`. Used for listing only, never for killing.
-  - **`WindowInfo` dataclass:** `hwnd: int, pid: int, cls: str, title: str, kind: str, owner_hwnd: int | None, visible: bool, url: str` (`url` read over COM when pywin32 is present, else `""`). `kind` is one of `"main"`, `"popup"`, `"html_dialog"`, `"script_dialog"`, `"system_dialog"`, `"other"`.
+  - **`WindowInfo` dataclass:** `hwnd: int, pid: int, cls: str, title: str, kind: str, owner_hwnd: int | None, visible: bool, url: str`. `url` is `""` unless the caller asks for it (`with_url=True`, which only `ie_windows` does, in the worker, through `com_call`); `modal_probe` never reads it, so the probe never touches COM. `kind` is one of `"main"`, `"popup"`, `"html_dialog"`, `"script_dialog"`, `"system_dialog"`, `"other"`.
   - **`classify(cls: str, has_ie_server_child: bool, owner_in_session: bool, hwnd: int, main_hwnd: int | None) -> str`:**
     - `Internet Explorer_TridentDlgFrame` → `html_dialog`.
-    - The alert class recorded by Q8 (expected `#32770`), owned by a session IE window → `script_dialog`. This is a *candidate*: Task 9 confirms it before acting.
+    - The alert class recorded by Q8 (expected `#32770`), owned by a session window (main, popup or `html_dialog`) or by a window whose owner chain reaches an `ATTACHED_TOPS` window → `script_dialog`. This is a *candidate*: Task 9 confirms it before acting.
     - Any other `#32770` → `system_dialog`.
     - A top window with an `Internet Explorer_Server` descendant → `main` if `hwnd == main_hwnd`, else `popup`.
     - Apply corrections recorded in D6.
-  - **`enumerate_windows(pids: set[int], enum_fn=None) -> list[WindowInfo]`.** The default uses `EnumWindows`/`EnumChildWindows`/`GetClassNameW`/`GetWindowTextW`/`GetWindowThreadProcessId`/`GetWindow(GW_OWNER)`. `enum_fn` is injectable for tests.
+  - **`enumerate_windows(pids: set[int], enum_fn=None, with_url: bool = False, attached_tops: set[int] | None = None) -> list[WindowInfo]`.** With `attached_tops`, it also returns windows whose owner chain reaches one of those hwnds. The default uses `EnumWindows`/`EnumChildWindows`/`GetClassNameW`/`GetWindowTextW`/`GetWindowThreadProcessId`/`GetWindow(GW_OWNER)`. `enum_fn` is injectable for tests.
   - **`session_window_pids() -> set[int]`:** per D6, `process_tree(SESSION.edge_pid)` or the owner-chain PIDs. Empty without a session.
   - **`ATTACHED_TOPS: set[int]`:** top-level hwnds of attached tabs (Task 15 fills it). For an attached tab, only windows whose owner chain reaches one of these hwnds count, never the rest of the user's Edge process tree.
   - **`modal_probe() -> list[dict]`:** the `html_dialog`, `script_dialog` and `system_dialog` windows in `session_window_pids()`, plus those owned (directly or through the owner chain) by an `ATTACHED_TOPS` window, as dicts.
@@ -728,7 +730,7 @@ git commit -m "feat: driver and COM backends with per-call target; integration r
     - for driver handles: switch to it, close it, and switch back to main.
   - **`ie_dialog`** gains `target`. Order of attempts:
     - the driver alert (`switch_to.alert`);
-    - else, for a `script_dialog` window, `action="text"` returns its static text (child `Static` controls). `accept`/`dismiss` send `WM_COMMAND` with the button IDs recorded in Q8, only after confirming the window: its owner is the session's `main_hwnd`, a session popup or an attached tab's top window, **and** its class and button IDs match the script-dialog shape recorded in Q8. (Task 12 adds a matching `dialog-open` record to the result as extra evidence; it is not required.)
+    - else, for a `script_dialog` window, `action="text"` returns its static text (child `Static` controls). `accept`/`dismiss` send `WM_COMMAND` with the button IDs recorded in Q8, only after confirming the window: its owner is a session window (`main_hwnd`, a popup or an `html_dialog`) or its owner chain reaches an attached tab's top window, **and** its class and button IDs match the script-dialog shape recorded in Q8. An alert raised inside a `showModalDialog` window is owned by that dialog, so it qualifies. (Task 12 adds a matching `dialog-open` record to the result as extra evidence; it is not required.)
     - `system_dialog` windows are refused.
   - **The `NOTICE:` text** (Task 6) recommends the D2 path first: `ie_switch_window` or `target="hwnd:<n>"`.
 
@@ -753,6 +755,8 @@ def test_lookup_dialog_grid_readable(self)        # with the dialog open: ie_gri
 def test_lookup_dialog_key_enter(self)            # in the dialog: fill search "B", ie_press_key Enter on search -> search_count == "1"
 def test_confirm_dialog_return_value(self)        # ask -> click yes in dialog -> answer == "yes"
 def test_nested_modal(self)                       # open_lookup -> nested -> nested_ok -> nested_result == "nested-ok" -> pick_B2 -> lookup_code == "B2"
+def test_alert_inside_dialog(self)                # open_lookup -> click dialog_alert -> ie_windows has a script_dialog owned by the html_dialog -> ie_dialog text == "Dialog alert" -> accept
+                                                  # -> dialog_alert_result == "alerted" (read through the D2 path)
 def test_driver_click_on_modal_opener_does_not_hang_server(self)  # ie_click mode="driver" on open_lookup; next ie_windows returns within IE_TOOL_TIMEOUT+5s listing the dialog;
                                                   # ie_close_window closes it; ie_get lookup_code works again
 # it_popups_alerts.py
@@ -883,7 +887,7 @@ git commit -m "feat: capture store with token-based, value-tracking redaction"
     It returns `NEED_MORE` while the answer could still change, unless `eof`: the buffer ends before the first tag is complete, inside the anchor tag, or inside or right after the skippable run. An offset is final only once the first tag **after** the skipped run has fully arrived (its name and closing `>`), so a stream split inside the run can never put the loader before an `X-UA-Compatible` meta.
 
     Otherwise it returns the offset:
-    - the **anchor** is the end of the `<head …>` tag, else the end of the `<html …>` tag, else the end of the doctype;
+    - the **anchor** is the end of the `<head …>` tag, else the end of the `<html …>` tag, else the end of the doctype. A document whose first tag is `<body` (no doctype, `<html` or `<head`) gets the loader right before `<body`; one whose first tag is `<frameset` gets `NEVER`;
     - from the anchor, skip whitespace, comments and `<meta …>`, `<title>…</title>` and `<base …>` elements, case-insensitive;
     - a tag name must be followed by whitespace, `/` or `>` (`<head` does not match `<header`), a `>` inside a quoted attribute value does not end a tag, and tags inside comments are ignored.
   - **`RecordingProxy(store: CaptureStore, host: str = "127.0.0.1", port: int = 0, instrument_js: bytes | None = None, upstream_proxy: tuple[str, int] | None = None, no_cache: bool = False)`** with `start() -> int`, `stop() -> None`, `seen: list[str]` (request URLs and CONNECT targets, in order, capped at 1000), `first_request: threading.Event`, and `doc_charsets` (URL → charset, the 1000 most recent).
@@ -913,6 +917,7 @@ def test_fragment_never_injected(self)                # b"OK|A1", b"<tr><td>1</t
 def test_utf16_never_injected(self)                   # body starting b"\xff\xfe" -> NEVER
 def test_headless_frameset_not_injected(self)         # <html><frameset …> -> NEVER
 def test_every_prefix_needs_more_or_final_answer(self)  # for each document above and every prefix length (eof=False): NEED_MORE, or the full-document answer
+def test_body_first_and_frameset_first(self)          # b"<body>x</body>" -> offset 0 (before <body); b"<frameset cols='*'>" -> NEVER; both also in the every-prefix test
 def test_tag_names_need_a_delimiter(self)             # <!DOCTYPE html><html><header>x</header> has no <head>: anchor after <html>, never inside <header>
 def test_quoted_gt_and_comments_ignored(self)         # <meta content="a>b"> skipped as one tag; <!-- <head> --> ignored
 # test_capture_proxy.py
@@ -975,7 +980,7 @@ git commit -m "feat: streaming recording proxy with document-only, mode-safe loa
     It calls the original host functions directly, branching on `arguments.length`. Popups forward their records to `opener.__iemcp.q` when same-origin.
   - **`hook.js`** takes `arguments[0]` = the `instrument.js` source and `arguments[1]` = flags (`stub`, `wrap_xhr`). Run once from the top document, it walks every same-origin frame in JS. In each document it:
     - sets the flags;
-    - injects the source (a `script` element with `text`) where `typeof window.__iemcp == 'undefined'`;
+    - injects the source where `typeof window.__iemcp == 'undefined'`, with `window.execScript` where it exists (old modes), else a `script` element with `text` that is removed again right after it runs, so `ie_html` shows the original DOM;
     - re-chains `onerror` if needed;
     - drains the queue.
 
@@ -987,7 +992,8 @@ git commit -m "feat: streaming recording proxy with document-only, mode-safe loa
   - **`instrument_hook`, registered in `POST_HOOKS`:** a single `execute_script(hook.js, source, flags)` on the top document, then parse into the `ConsoleStore`.
   - **`dialog_drain`, registered in `AFTER_CALL` (Task 6):**
     - for each `html_dialog` that `MODAL_PROBE` reports, it injects (if missing) and drains through `ComBackend(hwnd)`;
-    - for each `script_dialog`, it drains the document of the owner window through COM. This is best effort: a rejected call is skipped.
+    - for each `script_dialog`, it drains the document of the owner window through COM. This is best effort: a rejected call is skipped;
+    - while `backends.DEFAULT_TARGET` is a `tab:` target (Task 15), it also injects (if missing) and drains that tab's document.
 
     Records of a dialog that closes between two calls are lost; the README says so.
   - **`ie_dialog`** (Task 9) adds the matching `dialog-open` record, found with `ConsoleStore.find_dialog(<the window's static text>)`, to its result as extra evidence. Confirmation itself stays as Task 9 defines it.
@@ -1093,7 +1099,7 @@ def test_zone_notice_for_proxy_override_host(self)      # ProxyOverride "*.corp.
 def test_verification_normalises_urls(self)            # opened "HTTP://Host:80/a#x", proxy saw "http://host/a" -> capture_active True
 ```
 
-- [ ] **Step 2: Write the integration tests.** If D3 = `instrument-only`, write only `test_native_xhr_recorded_as_page_entry`, `test_xhr_fragment_identical_with_capture_on_and_off` and `test_document_mode_unchanged_by_injection` (the latter with instrumentation injected after load), and state in the README that form posts and document loads are not captured.
+- [ ] **Step 2: Write the integration tests.** If D10 = no, the proxy never injects: `test_load_time_error_captured` becomes `test_late_error_captured_without_loader` (click `late_error`, expect the error record), and `test_document_mode_unchanged_by_injection` checks that modes match Q6 (a). If D3 = `instrument-only`, write only `test_native_xhr_recorded_as_page_entry`, `test_xhr_fragment_identical_with_capture_on_and_off` and `test_document_mode_unchanged_by_injection` (the latter with instrumentation injected after load), and state in the README that form posts and document loads are not captured.
 
 ```python
 def test_form_post_captured_with_redaction(self)     # form.htm fill code=A1, pwd=s3cret, submit -> ie_network has POST …/echo;
@@ -1147,7 +1153,7 @@ git commit -m "feat: verified per-process network capture, network tools and ear
   - **`ie_screenshot` gains `scope`:**
     - `page` (default, driver);
     - `element` (driver, `by`/`value`);
-    - `window` (Win32: `main_hwnd` plus every open `html_dialog`/`script_dialog`, one image each, in z-order; `needs_driver=False`).
+    - `window` (Win32: `main_hwnd`, or the attached tab's top window while attached, plus every open `html_dialog`/`script_dialog`, one image each, in z-order; `needs_driver=False`).
 
     A `target` of `hwnd:<n>` captures that window only. The Task 4 `save_path` rules are kept.
 
@@ -1196,7 +1202,7 @@ git commit -m "feat: DPI-aware window screenshots including modal dialogs"
   - **`windows.ie_mode_tabs(enum_fn=None) -> list[TabInfo]`:** visible top windows of `msedge.exe` process trees that have an `Internet Explorer_Server` descendant. It **excludes** windows in the process trees of other live ie-mcp sessions (from their owner records). The URL is read through COM when pywin32 is present, else `""`.
   - **Tools** (`needs_driver=False`):
     - `ie_tabs()`;
-    - `ie_attach(hwnd: int)` sets `backends.DEFAULT_TARGET = f"tab:{hwnd}"`, adds the tab's `top_hwnd` to `ATTACHED_TOPS` (so `MODAL_PROBE` sees the dialogs that window owns, and nothing else of the user's Edge), and injects/drains instrumentation through `ComBackend`;
+    - `ie_attach(hwnd: int)` sets `backends.DEFAULT_TARGET = f"tab:{hwnd}"`, adds the tab's `top_hwnd` to `ATTACHED_TOPS` (so `MODAL_PROBE` sees the dialogs that window owns, and nothing else of the user's Edge), and injects/drains instrumentation through `ComBackend`. From then on, `dialog_drain` (Task 12) drains the tab after every call, `ie_windows` passes `attached_tops` to `enumerate_windows`, and `ie_screenshot scope=window` captures the tab's top window;
     - `ie_detach()` clears both and reports that the instrumentation stays in the tab until it is reloaded.
   - **While `backends.DEFAULT_TARGET` is set,** every tool without an explicit target whose `needs_driver(args)` is true is refused by `run_tool` with `isError` "attached to tab <hwnd>: this tool needs the driver session; call ie_detach first". Such a tool never starts a browser.
   - **Documented limits** (README and tool descriptions): on attached tabs there are no driver-only tools (history, page screenshot, upload) and no proxy capture. Keys, hover, window screenshots and console work through COM and Win32.
@@ -1210,7 +1216,8 @@ def test_attach_sets_and_detach_clears_default_target(self)  # also ATTACHED_TOP
 def test_driver_tools_refused_while_attached(self)         # DEFAULT_TARGET "tab:5"; ie_wait_ready -> isError containing "ie_detach"; SESSION.ensure not called
 def test_resolve_tab_target_uses_com_backend(self)
 # integration
-def test_attach_reads_ie_mode_tab(self)                     # ie_open form.htm; ie_tabs lists it; ie_attach(hwnd); ie_text frame "inner" (no target) contains "Inner frame"; ie_detach
+def test_attach_reads_ie_mode_tab(self)                     # ie_open form.htm; ie_tabs lists it; ie_attach(hwnd); ie_text frame "inner" (no target) contains "Inner frame";
+                                                            # click form.htm's send button in the tab, then ie_console lists records with where startswith "tab:"; ie_detach
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -1246,7 +1253,7 @@ git commit -m "feat: attach to user-opened IE-mode tabs over COM"
     - selenium import, discovered driver path, Edge path, pywin32;
     - fixture server start;
     - IE-mode session (Trident userAgent, `documentMode` 7 on `form.htm`);
-    - proxy verified and loader kept `documentMode` — `SKIP` when capture is not `proxy`;
+    - proxy verified — `SKIP` when capture is not `proxy`; loader kept `documentMode` — `SKIP` when capture is not `proxy` or D10 = no;
     - instrumentation present;
     - a modal dialog detected and closed;
     - no leftover processes.
