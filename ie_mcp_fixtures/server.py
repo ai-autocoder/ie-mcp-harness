@@ -2,9 +2,9 @@
 
 The fixture site reproduces legacy IE-only patterns (framesets, old document
 modes, showModalDialog, ActiveX XMLHTTP, form posts, windows-1252 pages) so the
-harness can be tested without any real application. It is served from two
-listeners on the same host but different ports, which gives the pages a second
-origin for cross-origin frame tests.
+harness can be tested without any real application. It is served on two
+origins: ``http://<host>:<port>/`` and ``http://localhost:<alt_port>/``. IE's
+same-origin rule ignores the port, so the second origin uses another host name.
 
 Every response is marked ``Cache-Control: no-store`` and carries no
 validators, so nothing the tests load lands in the per-user WinINet cache that
@@ -13,13 +13,17 @@ the user's own IE-mode browsing shares.
 
 from __future__ import annotations
 
+import errno
 import html
 import http.server
+import itertools
 import mimetypes
 import socket
+import sys
 import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 
 SITE_DIR = Path(__file__).resolve().parent / "site"
@@ -29,6 +33,82 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 MAX_SLOW_MS = 60_000
 
 LOOKUP_ITEMS = (("A1", "Alpha"), ("B2", "Beta"), ("C3", "Gamma"))
+
+FRAGMENT_BODY = b"OK|A1"
+
+BIG_SIZE = 1024 * 1024
+BIG_CHUNK = 8192
+BIG_PATTERN = (b"0123456789abcdef" * (BIG_CHUNK // 16))
+
+PROGRESSIVE_GAP = 0.05  # seconds between the head writes
+POLL_INTERVAL = 0.05  # seconds; listener poll, bounds how long stop() waits
+PROGRESSIVE_PARTS = (
+    b'<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" '
+    b'"http://www.w3.org/TR/html4/loose.dtd"><html><head><title>progressive</title>',
+    b'<meta http-equiv="X-UA-Compatible" content="IE=7">',
+    b'<link rel="stylesheet" href="data:text/css,">',
+    b"</head><body>progressive ok</body></html>",  # sent after the ms delay
+)
+
+
+class HeaderDict(dict):
+    """Read-only mapping of header names to values; names compare case-insensitively.
+
+    Iteration yields the names as the client sent them; a repeated header keeps
+    its last value. It is built once per request and never changed, so every
+    mutator raises TypeError (a mutable version would need to keep the
+    lower-case index in sync on every path, including update/pop/setdefault).
+    """
+
+    def __init__(self, items=()):
+        merged = {}
+        names = {}
+        for name, value in items:
+            old = names.get(name.lower())
+            if old is not None and old != name:
+                del merged[old]
+            names[name.lower()] = name
+            merged[name] = value
+        super().__init__(merged)
+        self._names = names
+
+    def __getitem__(self, name):
+        if isinstance(name, str):
+            name = self._names.get(name.lower(), name)
+        return super().__getitem__(name)
+
+    def __contains__(self, name):
+        return isinstance(name, str) and name.lower() in self._names
+
+    def get(self, name, default=None):
+        return self[name] if name in self else default
+
+    def copy(self):
+        return HeaderDict(self.items())
+
+    __copy__ = copy
+
+    def __deepcopy__(self, memo):
+        return HeaderDict(self.items())  # names and values are immutable str
+
+    def __reduce__(self):
+        return (HeaderDict, (list(self.items()),))
+
+    def _read_only(self, *args, **kwargs):
+        raise TypeError("HeaderDict is read-only")
+
+    __setitem__ = __delitem__ = __ior__ = _read_only
+    update = pop = popitem = setdefault = clear = _read_only
+
+
+@dataclass(frozen=True)
+class RequestRecord:
+    """One request either listener received."""
+
+    method: str
+    path: str
+    headers: HeaderDict  # case-insensitive names
+    conn_id: int  # identifies the client TCP connection
 
 # HTML pages are sent without a charset parameter on purpose: a header charset
 # would override the page's own <meta> declaration, and the fixtures exist to
@@ -84,8 +164,36 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
     timeout = 30
 
     alt_base_url = ""  # set on a per-server subclass
+    fixture = None     # the owning FixtureServer, set on a per-server subclass
 
     _cache_header_sent = False
+    conn_id = 0
+
+    def setup(self):
+        super().setup()
+        # One handler instance serves one client TCP connection (all of its
+        # keep-alive requests), so the connection id is assigned here.
+        self.conn_id = self.fixture._next_conn_id()
+        # False once stop() has begun: this connection then gets no reply.
+        self._accepted = self.fixture._track(self.connection)
+
+    def handle(self):
+        if self._accepted:
+            super().handle()
+
+    def finish(self):
+        try:
+            super().finish()
+        finally:
+            self.fixture._untrack(self.connection)
+
+    def parse_request(self):
+        ok = super().parse_request()
+        if ok:
+            self.fixture._record(RequestRecord(
+                method=self.command, path=self.path,
+                headers=HeaderDict(self.headers.items()), conn_id=self.conn_id))
+        return ok
 
     def version_string(self):
         return self.server_version
@@ -140,6 +248,14 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
         elif parts.path == "/cookie":
             self._send(200, "text/plain; charset=utf-8", b"cookie set",
                        [("Set-Cookie", "sid=fixture-session; Path=/")])
+        elif parts.path == "/fragment":
+            # A bare HTML fragment, as legacy XHR endpoints return: text/html
+            # but no tags, so a proxy must never inject into it.
+            self._send(200, "text/html", FRAGMENT_BODY)
+        elif parts.path == "/big":
+            self._big(query.get("ms", ["0"])[0])
+        elif parts.path == "/progressive":
+            self._progressive(query.get("ms", ["0"])[0])
         else:
             self._static(parts.path)
 
@@ -202,14 +318,65 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
         xml = '<?xml version="1.0" encoding="utf-8"?><items>%s</items>' % items
         self._send(200, "text/xml; charset=utf-8", xml.encode("utf-8"))
 
-    def _slow(self, ms):
+    def _delay_ms(self, ms):
+        """Parse an ``ms`` query value, or answer 400 and return None."""
         try:
-            delay = max(0, min(int(ms), MAX_SLOW_MS))
+            return max(0, min(int(ms), MAX_SLOW_MS))
         except ValueError:
             self._send_text(400, "ms must be an integer")
+            return None
+
+    def _start_stream(self, content_type, length):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        self.end_headers()
+
+    def _slow(self, ms):
+        delay = self._delay_ms(ms)
+        if delay is None:
             return
         time.sleep(delay / 1000.0)
         self._send_text(200, "slow ok")
+
+    def _big(self, ms):
+        """1 MB of text/plain in 8 KB writes spread over ``ms``."""
+        delay = self._delay_ms(ms)
+        if delay is None:
+            return
+        self._start_stream("text/plain", BIG_SIZE)
+        if self.command == "HEAD":
+            return
+        chunks = BIG_SIZE // BIG_CHUNK
+        pause = delay / 1000.0 / max(1, chunks - 1)
+        start = time.monotonic()
+        for i in range(chunks):
+            # Sleep until this write's deadline rather than a fixed pause: on
+            # Windows a short sleep rounds up to the ~15.6 ms timer tick on some
+            # Python versions, which would stretch the total far beyond ms.
+            wait = start + i * pause - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self.wfile.write(BIG_PATTERN)
+
+    def _progressive(self, ms):
+        """An IE7 document whose head arrives in separate small writes."""
+        delay = self._delay_ms(ms)
+        if delay is None:
+            return
+        # Without TCP_NODELAY, Nagle's algorithm could merge the small head
+        # writes into one segment, and a reader would not see them apart.
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._start_stream("text/html", sum(len(p) for p in PROGRESSIVE_PARTS))
+        if self.command == "HEAD":
+            return
+        last = len(PROGRESSIVE_PARTS) - 1
+        for i, part in enumerate(PROGRESSIVE_PARTS):
+            if i == last:
+                time.sleep(delay / 1000.0)
+            elif i:
+                time.sleep(PROGRESSIVE_GAP)
+            self.wfile.write(part)
 
 
 class _ExclusiveHTTPServer(http.server.ThreadingHTTPServer):
@@ -219,6 +386,17 @@ class _ExclusiveHTTPServer(http.server.ThreadingHTTPServer):
     # server could share a port with another program. Bind exclusively.
     allow_reuse_address = False
     daemon_threads = True
+    stopping = False
+
+    def handle_error(self, request, client_address):
+        # Browsers cancel loads and drop idle keep-alive connections all the
+        # time; that is not a server error worth a traceback.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        if self.stopping and isinstance(exc, OSError):
+            return  # stop() closed this connection under the handler
+        super().handle_error(request, client_address)
 
     def server_bind(self):
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -226,40 +404,172 @@ class _ExclusiveHTTPServer(http.server.ThreadingHTTPServer):
         super().server_bind()
 
 
-class FixtureServer:
-    """The fixture site on two ports of one host (two origins).
+class _ExclusiveHTTPServer6(_ExclusiveHTTPServer):
+    address_family = socket.AF_INET6
 
-    ``base_url`` and ``alt_base_url`` serve the same content. Use it as a
-    context manager, or call ``stop()``.
+
+# Windows reports a port held by another socket as WSAEADDRINUSE (10048), or
+# WSAEACCES (10013) when the holder bound it with SO_EXCLUSIVEADDRUSE.
+_PORT_IN_USE = {errno.EADDRINUSE, errno.EACCES, 10048, 10013}
+
+
+def _port_in_use(exc: OSError) -> bool:
+    return exc.errno in _PORT_IN_USE or getattr(exc, "winerror", None) in _PORT_IN_USE
+
+
+class FixtureServer:
+    """The fixture site on two origins.
+
+    ``base_url`` is ``http://<host>:<port>/``. ``alt_base_url`` is
+    ``http://localhost:<alt_port>/``: IE's same-origin rule ignores the port,
+    so the second origin needs another host name, not only another port. The
+    alt port listens on 127.0.0.1 and, when IPv6 loopback is available, on
+    ::1, because "localhost" may resolve to either.
+
+    Quirk: with default Internet Options, IE maps ``127.0.0.1`` to the
+    Internet zone (Protected Mode on) and the dotless ``localhost`` to the
+    Local intranet zone (Protected Mode off; intranet sites may also open in
+    Compatibility View). The two origins are therefore on opposite sides of
+    the Protected-Mode boundary: open alt-origin pages in their own session
+    (``initial_browser_url`` on the alt origin) rather than navigating there,
+    and record each origin's zone next to any cross-origin result.
+
+    Both serve the same content. ``requests`` lists every request either
+    listener received. Use it as a context manager, or call ``stop()``.
     """
+
+    ALT_BIND_ATTEMPTS = 5
 
     def __init__(self, host: str = "127.0.0.1", port: int = 0, alt_port: int = 0):
         if port and port == alt_port:
             raise ValueError("port and alt_port must differ (two origins)")
-        handler = type("FixtureHandler", (_FixtureHandler,), {})
+        if host.lower() == "localhost":
+            # The second origin is http://localhost:<alt_port>/; IE ignores ports
+            # in its same-origin rule, so both would be one origin.
+            raise ValueError("host must not be 'localhost' (it names the second origin)")
+        handler = type("FixtureHandler", (_FixtureHandler,), {"fixture": self})
+        self._lock = threading.Lock()
+        self._requests: list[RequestRecord] = []
+        self._connections: set = set()
+        self._stopped = False
+        self._conn_ids = itertools.count(1)
         self._servers = []
         try:
-            for p in (port, alt_port):
-                self._servers.append(_ExclusiveHTTPServer((host, p), handler))
+            self._servers.append(_ExclusiveHTTPServer((host, port), handler))
+            self._servers.extend(self._bind_alt(alt_port, handler))
         except BaseException:
             for srv in self._servers:
                 srv.server_close()
             raise
         self.base_url = _url(host, self._servers[0].server_address[1])
-        self.alt_base_url = _url(host, self._servers[1].server_address[1])
+        self.alt_base_url = _url("localhost", self._servers[1].server_address[1])
         handler.alt_base_url = self.alt_base_url
+        # A short poll interval keeps stop() fast: shutdown() waits for the
+        # listener's next poll, which defaults to 0.5 s.
         self._threads = [
             threading.Thread(target=srv.serve_forever, name="fixture-server",
-                             daemon=True)
+                             kwargs={"poll_interval": POLL_INTERVAL}, daemon=True)
             for srv in self._servers
         ]
         for thread in self._threads:
             thread.start()
 
+    def _bind_alt(self, alt_port, handler):
+        """Bind the alt port on 127.0.0.1 and, if available, on ::1.
+
+        With ``alt_port=0`` the port is picked on 127.0.0.1; if another
+        program already holds that port on ::1, try another port, so
+        "localhost" can never reach someone else's server.
+        """
+        attempts = 1 if alt_port else self.ALT_BIND_ATTEMPTS
+        for attempt in range(attempts):
+            v4 = _ExclusiveHTTPServer(("127.0.0.1", alt_port), handler)
+            if not socket.has_ipv6:
+                return [v4]
+            try:
+                v6 = _ExclusiveHTTPServer6(("::1", v4.server_address[1]), handler)
+            except OSError as exc:
+                if _port_in_use(exc):
+                    v4.server_close()
+                    if attempt + 1 < attempts:
+                        continue
+                    raise
+                # No IPv6 loopback on this machine: 127.0.0.1 alone is enough.
+                return [v4]
+            except BaseException:
+                v4.server_close()
+                raise
+            return [v4, v6]
+        raise OSError("could not bind the alt port on 127.0.0.1 and ::1")
+
+    # -- request log -----------------------------------------------------
+
+    def _next_conn_id(self) -> int:
+        with self._lock:
+            return next(self._conn_ids)
+
+    def _record(self, record: RequestRecord) -> None:
+        with self._lock:
+            if not self._stopped:
+                self._requests.append(record)
+
+    def _track(self, conn) -> bool:
+        """Register an accepted connection; False once stop() has begun.
+
+        stop() sets ``_stopped`` and snapshots the connections under the same
+        lock, so every connection is either in that snapshot (and closed by
+        stop) or refused here - none is served after stop() returns.
+        """
+        with self._lock:
+            if self._stopped:
+                return False
+            self._connections.add(conn)
+            return True
+
+    def _untrack(self, conn) -> None:
+        with self._lock:
+            self._connections.discard(conn)
+
+    @property
+    def requests(self) -> list[RequestRecord]:
+        """A snapshot of every request received so far, oldest first."""
+        with self._lock:
+            return list(self._requests)
+
+    def clear_requests(self) -> None:
+        with self._lock:
+            self._requests.clear()
+
+    # -- lifecycle -------------------------------------------------------
+
     def stop(self) -> None:
+        """Stop listening and close every open connection; safe to call twice."""
+        with self._lock:
+            self._stopped = True
+            open_conns = list(self._connections)
         for srv in self._servers:
-            srv.shutdown()
+            srv.stopping = True
+        # shutdown() waits for serve_forever's next poll; stop all listeners at
+        # once instead of one after another.
+        stoppers = [threading.Thread(target=srv.shutdown, daemon=True)
+                    for srv in self._servers]
+        for stopper in stoppers:
+            stopper.start()
+        for stopper in stoppers:
+            stopper.join(timeout=5)
+        for srv in self._servers:
             srv.server_close()
+        # Keep-alive connections outlive the listeners: without this a browser's
+        # pooled connection would still be served by a "stopped" server.
+        for conn in open_conns:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                conn.close()
+            except OSError:
+                pass
         for thread in self._threads:
             thread.join(timeout=5)
 

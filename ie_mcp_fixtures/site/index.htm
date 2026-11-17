@@ -4,6 +4,34 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <title>Fixture index</title>
+<script type="text/javascript">
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (typeof el.innerText != 'undefined') { el.innerText = text; } else { el.textContent = text; }
+}
+function keyCodeOf(e) {
+  e = e || window.event;
+  return e.keyCode || e.which || 0;
+}
+// The count and characters live in variables: reading them back through
+// innerText could collapse whitespace. resetTyped() starts over.
+var typedCount = 0;
+var typedChars = '';
+function resetTyped() {
+  typedCount = 0;
+  typedChars = '';
+  setText('keypress_count', '0');
+  setText('typed_chars', '');
+}
+function onTypedKey(e) {
+  var code = keyCodeOf(e);
+  typedCount = typedCount + 1;
+  typedChars = typedChars + String.fromCharCode(code);
+  setText('keypress_count', String(typedCount));
+  setText('typed_chars', typedChars);
+  return true;
+}
+</script>
 </head>
 <body>
 <h1>Fixture index</h1>
@@ -26,6 +54,15 @@
 <li><a id="link_popup" name="link_popup" href="popup.htm">popup.htm</a> &mdash; popup window</li>
 <li><a id="link_errors" name="link_errors" href="errors.htm">errors.htm</a> &mdash; script errors and console output</li>
 <li><a id="link_grid" name="link_grid" href="grid.htm">grid.htm</a> &mdash; table filled after a delay</li>
+<li><a id="link_nomode" name="link_nomode" href="nomode.htm">nomode.htm</a> &mdash; HTML5 doctype without a mode meta</li>
+<li><a id="link_headless" name="link_headless" href="headless.htm">headless.htm</a> &mdash; IE7 meta but no head tag</li>
+<li><a id="link_latecharset" name="link_latecharset" href="latecharset.htm">latecharset.htm</a> &mdash; windows-1252 meta after a script</li>
 </ul>
+<p>
+<label for="typed">Typed</label>
+<input type="text" id="typed" name="typed" onkeypress="return onTypedKey(event)">
+Key presses: <span id="keypress_count">0</span>
+Characters: <span id="typed_chars"></span>
+</p>
 </body>
 </html>

@@ -252,6 +252,11 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 - `ensure_clean_session=True` clears the user's whole IE-mode cookie store and cache, not only
   the session's. Upstream forces it on (`ie_mcp.py`, `IeSession._build`); plan Task 4 makes it
   opt-in (`IE_CLEAN_SESSION=1`).
+- With default Internet Options IE maps `127.0.0.1` to the Internet zone (Protected Mode on)
+  and the dotless `localhost` to the Local intranet zone (Protected Mode off, intranet
+  Compatibility View possible). The fixture's two origins therefore sit on opposite sides of
+  the Protected-Mode boundary: open alt-origin pages in their own session, and record the zone
+  (`MapUrlToZone`, read-only) next to cross-origin results.
 
 Write a code comment for every new quirk you work around; they are rarely obvious.
 

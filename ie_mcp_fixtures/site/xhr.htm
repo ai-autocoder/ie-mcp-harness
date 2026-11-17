@@ -20,13 +20,28 @@ function postPing(x) {
   x.send('q=ping');
 }
 
-function doLoad() {
+function makeXhr() {
   var x = null;
   // IE11 hides window.ActiveXObject from feature tests but still supports
   // "new ActiveXObject", so try it directly.
   try { x = new ActiveXObject('Microsoft.XMLHTTP'); } catch (e) { x = null; }
   if (!x) { x = new XMLHttpRequest(); }
-  postPing(x);
+  return x;
+}
+
+function doLoad() {
+  postPing(makeXhr());
+}
+
+function doLoadFragment() {
+  var x = makeXhr();
+  x.open('GET', '/fragment', true);
+  x.onreadystatechange = function () {
+    if (x.readyState == 4) {
+      setText('fragment_result', x.responseText);
+    }
+  };
+  x.send(null);
 }
 
 function doLoadNative() {
@@ -43,5 +58,7 @@ function doLoadNative() {
 <input type="button" id="load" name="load" value="Load (ActiveX)" onclick="doLoad()">
 <input type="button" id="load_native" name="load_native" value="Load (native)" onclick="doLoadNative()">
 <p>Result: <span id="xhr_result"></span></p>
+<input type="button" id="load_fragment" name="load_fragment" value="Load fragment" onclick="doLoadFragment()">
+<p>Fragment: <span id="fragment_result"></span></p>
 </body>
 </html>

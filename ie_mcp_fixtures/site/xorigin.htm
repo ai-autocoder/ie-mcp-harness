@@ -5,7 +5,8 @@
 </head>
 <body>
 <h3>Cross-origin frames</h3>
-<p>Frame <code>foreign</code> comes from a second origin (same host, other port); frame <code>local</code> from this one.</p>
+<p>Frame <code>foreign</code> comes from the second origin (host name <code>localhost</code>, its own port); frame <code>local</code> from this one.</p>
+<!-- With default Internet Options IE puts localhost in the Local intranet zone and 127.0.0.1 in the Internet zone, so the two frames also differ in security zone. Protected Mode is per tab and follows the top-level page, so both frames run with the same Protected Mode. -->
 <iframe id="foreign" name="foreign" src="{{ALT_BASE}}inner.htm" width="300" height="100"></iframe>
 <iframe id="local" name="local" src="inner.htm" width="300" height="100"></iframe>
 </body>
