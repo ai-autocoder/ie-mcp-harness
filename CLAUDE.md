@@ -27,7 +27,7 @@ Chromium automation tool gives on a modern page, **without changing how the page
 [docs/superpowers/specs/2026-11-17-ie-mode-harness-design.md](docs/superpowers/specs/2026-11-17-ie-mode-harness-design.md)
 and the task-by-task implementation plan is in
 [docs/superpowers/plans/2026-11-17-ie-mode-harness.md](docs/superpowers/plans/2026-11-17-ie-mode-harness.md).
-Work through the plan in order. Task 2 is a spike whose recorded decisions (D1–D13) select
+Work through the plan in order. Task 2 is a spike whose recorded decisions (D1–D15) select
 variants in later tasks; do not skip it.
 
 ## Golden rule: keep it generic
