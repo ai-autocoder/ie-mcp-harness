@@ -227,6 +227,26 @@ All configuration is via environment variables — **all optional**:
 | `ie_sleep` | Sleep N seconds (last resort; prefer `ie_wait_ready` / `ie_wait_text`). |
 | `ie_close` | Quit the browser; the session lease stays with this server. `force=true` never talks to the driver: it cancels running waits and kills this session's own Edge and IEDriver after an identity check (use it when the driver hangs). |
 
+### Acting on a dialog or tab over COM (`target`)
+
+`ie_html`, `ie_text`, `ie_js`, `ie_click`, `ie_fill`, `ie_select`, `ie_get`, `ie_frames`,
+`ie_wait_element`, `ie_wait_text`, `ie_grid`, `ie_scroll`, `ie_press_key` and `ie_hover` take an
+optional `target`. Omitted, the tool uses the session's IE driver. `hwnd:<n>` acts on window
+`<n>` (for example a `showModalDialog` window named in a `NOTICE:`) directly over COM, and
+`tab:<n>` on an attached tab; these calls do not need the driver, so they work while a modal
+dialog blocks it. Over COM:
+
+- every DOM access runs as script in the page; the window keeps two expandos,
+  `__iemcp_r` and `__iemcp_e`, whose values are cleared after each call;
+- input is **synthetic**: script events for fill and hover, a click queued on the page's timer
+  (no mousedown/mouseup/focus), posted key messages for keys;
+- locators are `id`, `name`, `tag`, `class`, `link_text` and, from documentMode 8, `css`;
+  `xpath` is rejected;
+- `ie_html` returns the document's `outerHTML` (no doctype).
+
+A `tab:` target never falls back to another tab: when the attached tab is gone the call fails
+and asks you to attach again.
+
 ### Working with frames
 
 Many legacy apps are framesets. Use `ie_frames` to enumerate them, then pass `frame` to most
@@ -406,11 +426,22 @@ no tool call can hang the server:
 
 ### Tests
 
-The ownership suite uses mocked process tables and never opens Edge:
+Unit tests use mocked process tables, windows and COM documents and never open Edge:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
+
+Integration tests (`tests/integration/it_*.py`) open a real, visible IE-mode window against the
+fixture site on `127.0.0.1`, so they need an unlocked desktop. Run them only through the runner,
+which sets `IE_MCP_INTEGRATION=1` and **fails if any test was skipped**; run one at a time:
+
+```bash
+python scripts/run_integration.py                    # all modules
+python scripts/run_integration.py it_read_interact   # one module
+```
+
+Each module closes its session and checks that no Edge or IEDriver process it started is left.
 
 ### Contributing
 

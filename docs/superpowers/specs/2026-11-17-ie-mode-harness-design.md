@@ -82,7 +82,8 @@ changing how the page behaves**.
 | IEDriver native input without window focus (`native_events=True`, `require_window_focus=False`: window messages, no focus, no physical mouse; synthetic events did nothing on the development machine, spike D17) | `IE_INTERACTION_MODE=background` (the default) | `IE_INTERACTION_MODE=native` (takes focus; can mix with the user's keystrokes and mouse) |
 | A complete no-op `console` created where the page has none | `IE_CONSOLE_STUB=1` (off by default) | `IE_CONSOLE_STUB=0` |
 | Async (script) clicks: `e.click()` queued with `setTimeout`; not user-initiated, no mousedown/mouseup/focus, may be blocked by the pop-up blocker | `ie_click mode="async"` or `IE_CLICK_MODE=async` (default is `driver`, spike D1) | `mode="driver"` / `IE_CLICK_MODE=driver` (the default) |
-| COM input on dialogs and attached tabs: synthetic event sequence or posted key messages | `target="hwnd:…"`/`"tab:…"` | use the driver path when it works |
+| COM input on dialogs and attached tabs: synthetic script events (`ie_fill`: focus, value, keydown/keypress/keyup/change/blur; `ie_hover`: mouseover/mouseenter), a timer click (`setTimeout`, no mousedown/mouseup/focus, also for `double`/`right`, which fire `ondblclick`/`oncontextmenu`), and posted `WM_KEYDOWN`/`WM_KEYUP` messages (documentMode 7+; `fireEvent` below 7) | `target="hwnd:…"`/`"tab:…"` | omit `target` (the driver path) when it works |
+| COM request wrapper: every COM read or action runs as script and leaves the window expandos `__iemcp_r` (`null`) and `__iemcp_e` (`''`) on the target window (top window for frame requests); their values are cleared after each read-back | `target="hwnd:…"`/`"tab:…"` | omit `target` |
 | Instrumentation left in an attached tab after `ie_detach` | `ie_attach` used | reload the tab |
 
 ## Open questions answered by the spike (plan Task 2)

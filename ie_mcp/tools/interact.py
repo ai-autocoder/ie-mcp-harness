@@ -3,29 +3,11 @@ import json
 import time
 from pathlib import Path
 
-from ie_mcp import config, js
+from ie_mcp import config
+from ie_mcp.backends import (OptionNotFound, TARGET_SCHEMA, resolve_backend, target_kind,
+                            uses_driver)
 from ie_mcp.protocol import locator_budget, text_result, tool
 from ie_mcp.session import SESSION
-
-
-_KEY_MAP = None
-
-
-def _key(name):
-    global _KEY_MAP
-    from selenium.webdriver.common.keys import Keys
-    if _KEY_MAP is None:
-        _KEY_MAP = {
-            "enter": Keys.ENTER, "return": Keys.RETURN, "tab": Keys.TAB,
-            "escape": Keys.ESCAPE, "esc": Keys.ESCAPE, "space": Keys.SPACE,
-            "backspace": Keys.BACK_SPACE, "delete": Keys.DELETE, "del": Keys.DELETE,
-            "up": Keys.ARROW_UP, "down": Keys.ARROW_DOWN, "left": Keys.ARROW_LEFT,
-            "right": Keys.ARROW_RIGHT, "arrowup": Keys.ARROW_UP, "arrowdown": Keys.ARROW_DOWN,
-            "arrowleft": Keys.ARROW_LEFT, "arrowright": Keys.ARROW_RIGHT,
-            "home": Keys.HOME, "end": Keys.END, "pageup": Keys.PAGE_UP,
-            "pagedown": Keys.PAGE_DOWN, "f5": Keys.F5,
-        }
-    return _KEY_MAP.get(name.lower(), name)
 
 
 # Post-action pauses; each tool's watchdog budget is computed from the same defaults.
@@ -34,20 +16,21 @@ SELECT_WAIT = 2
 PRESS_KEY_WAIT = 1
 HOVER_WAIT = 1
 
-# Queue the click on the page's own timer without waiting for its handlers. A WebDriver click whose handler
-# opens alert/confirm/showModalDialog can block until that dialog closes; a timer callback
-# cannot block this call. The price: the click is script-initiated (see the tool description).
-ASYNC_CLICK_SCRIPT = ("var e=arguments[0];window.setTimeout(function(){e.click();},0);"
-                      "return 'queued';")
-
 
 def _click_mode(args):
     return args.get("mode") or config.SETTINGS.click_mode
 
 
 def _click_is_deferred(args):
-    """An async plain click only queues e.click(); double/right always use the driver."""
-    return args.get("action", "click") == "click" and _click_mode(args) == "async"
+    """An async plain click only queues e.click(); double/right always use the driver.
+
+    Over COM a plain click is always queued (``ComBackend.queues_click``), so it defers its
+    effect whatever the click mode; double/right fire their events at once.
+    """
+    plain = args.get("action", "click") == "click"
+    if target_kind(args.get("target")) != "driver":
+        return plain
+    return plain and _click_mode(args) == "async"
 
 
 @tool(
@@ -60,7 +43,8 @@ def _click_is_deferred(args):
     "click opens a dialog that would block a driver click. It is script-initiated: there is "
     "no mousedown/mouseup/focus, handlers that test for a user gesture can behave differently, "
     "and the pop-up blocker may block a window.open it triggers. double and right always use "
-    "the driver.",
+    "the driver. Over COM (target hwnd:/tab:) a click is always queued on the page's timer and "
+    "synthetic (script events, not mouse input).",
     {
         "type": "object",
         "properties": {
@@ -71,11 +55,13 @@ def _click_is_deferred(args):
             "frame": {"type": ["string", "integer"]},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
             "wait": {"type": "number", "description": "seconds to pause after the click (default 2)"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["by", "value"],
     },
     budget=locator_budget(CLICK_WAIT),
     defers_effect=_click_is_deferred,
+    needs_driver=uses_driver,
 )
 def t_click(args):
     action = args.get("action", "click")
@@ -85,26 +71,20 @@ def t_click(args):
         raise ValueError("action must be click|double|right")
     if mode not in config.CLICK_MODES:
         raise ValueError("mode must be driver|async")
-    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
-    if action == "click" and mode == "async":
-        SESSION.ensure().execute_script(ASYNC_CLICK_SCRIPT, el)
-    elif action == "click":
-        el.click()
-    else:
-        from selenium.webdriver.common.action_chains import ActionChains
-        ac = ActionChains(SESSION.driver)
-        if action == "double":
-            ac.double_click(el).perform()
-        else:
-            ac.context_click(el).perform()
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    backend.click(el, action, mode)
     time.sleep(args.get("wait", CLICK_WAIT))
-    queued = " (async: queued, runs after this call returns)" if action == "click" and mode == "async" else ""
+    queued = (" (async: queued, runs after this call returns)"
+              if backend.queues_click(action, mode) else "")
     return text_result(f"{action}-clicked {args['by']}={args['value']}{queued}")
 
 
 @tool(
     "ie_fill",
-    "Type text into an input/textarea element (auto-waits).",
+    "Type text into an input/textarea element (auto-waits). Over COM (target hwnd:/tab:) the "
+    "value is set by script and key/change/blur events are fired: synthetic, not keystrokes.",
     {
         "type": "object",
         "properties": {
@@ -114,16 +94,18 @@ def t_click(args):
             "frame": {"type": ["string", "integer"]},
             "clear": {"type": "boolean"},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["by", "value", "text"],
     },
     budget=locator_budget(),
+    needs_driver=uses_driver,
 )
 def t_fill(args):
-    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
-    if args.get("clear", True):
-        el.clear()
-    el.send_keys(args["text"])
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    backend.fill(el, args["text"], args.get("clear", True))
     return text_result(f"filled {args['by']}={args['value']}")
 
 
@@ -142,10 +124,12 @@ def t_fill(args):
             "frame": {"type": ["string", "integer"]},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
             "wait": {"type": "number", "description": "seconds to pause after selecting (default 2)"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["by", "value"],
     },
     budget=locator_budget(SELECT_WAIT),
+    needs_driver=uses_driver,
 )
 def t_select(args):
     """Select an <option> by label/value/index, set via JS + fire onchange.
@@ -153,8 +137,9 @@ def t_select(args):
     (Selenium's Select clicks the <option>, which the legacy Trident engine
     rejects with "Error executing JavaScript" — so we set it directly.)
     """
-    d = SESSION.ensure()
-    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
     if "label" in args:
         mode, val = "label", args["label"]
     elif "option_value" in args:
@@ -163,18 +148,21 @@ def t_select(args):
         mode, val = "index", str(args["index"])
     else:
         raise ValueError("provide one of: label, option_value, index")
-    res = d.execute_script(js.load("select.js"), el, mode, val)
-    if res == "NOTFOUND":
-        raise ValueError(f"option {mode}={val!r} not found in {args['by']}={args['value']}")
+    try:
+        chosen = backend.select(el, mode, val)
+    except OptionNotFound:
+        raise ValueError(f"option {mode}={val!r} not found in {args['by']}={args['value']}") from None
     time.sleep(args.get("wait", SELECT_WAIT))
-    return text_result(f"selected {mode}={val} -> {res[3:]}")
+    return text_result(f"selected {mode}={val} -> {chosen}")
 
 
 @tool(
     "ie_press_key",
     "Press a key on an element (if by/value given) or the active element. "
     "Key names: Enter, Tab, Escape, Space, Backspace, Delete, Up/Down/Left/Right, "
-    "Home, End, PageUp, PageDown, F5 — or a literal character.",
+    "Home, End, PageUp, PageDown, F5, or a literal character. Over COM (target hwnd:/tab:) "
+    "the key is posted to the window as WM_KEYDOWN/WM_KEYUP (documentMode 7+), so Shift-modified "
+    "characters are typed unshifted.",
     {
         "type": "object",
         "properties": {
@@ -184,22 +172,23 @@ def t_select(args):
             "frame": {"type": ["string", "integer"]},
             "wait": {"type": "number"},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["key"],
     },
     budget=locator_budget(PRESS_KEY_WAIT),
+    needs_driver=uses_driver,
 )
 def t_press_key(args):
     """Press a key (Enter/Tab/Escape/arrows/etc. or a literal char) on an element or the page."""
-    d = SESSION.ensure()
-    key = _key(args["key"])
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
     if args.get("value"):
-        el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
-        el.send_keys(key)
+        el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+        backend.press_key(el, args["key"], args.get("frame"))
         where = f"{args['by']}={args['value']}"
     else:
-        SESSION._apply_frame(args.get("frame"))
-        d.switch_to.active_element.send_keys(key)
+        backend.press_key(None, args["key"], args.get("frame"))
         where = "active element"
     time.sleep(args.get("wait", PRESS_KEY_WAIT))
     return text_result(f"pressed {args['key']} on {where}")
@@ -207,7 +196,8 @@ def t_press_key(args):
 
 @tool(
     "ie_hover",
-    "Hover the mouse over an element (for menus/tooltips).",
+    "Hover the mouse over an element (for menus/tooltips). Over COM (target hwnd:/tab:) "
+    "mouseover and mouseenter events are fired by script: synthetic, the mouse does not move.",
     {
         "type": "object",
         "properties": {
@@ -216,16 +206,18 @@ def t_press_key(args):
             "frame": {"type": ["string", "integer"]},
             "wait": {"type": "number"},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["by", "value"],
     },
     budget=locator_budget(HOVER_WAIT),
+    needs_driver=uses_driver,
 )
 def t_hover(args):
-    from selenium.webdriver.common.action_chains import ActionChains
-    d = SESSION.ensure()
-    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
-    ActionChains(d).move_to_element(el).perform()
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    backend.hover(el)
     time.sleep(args.get("wait", HOVER_WAIT))
     return text_result(f"hovered {args['by']}={args['value']}")
 
@@ -244,9 +236,11 @@ def t_hover(args):
             "dy": {"type": "integer"},
             "frame": {"type": ["string", "integer"]},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "target": TARGET_SCHEMA,
         },
     },
     budget=locator_budget(),
+    needs_driver=uses_driver,
 )
 def t_scroll(args):
     """Scroll: bring an element into view (by/value), or scroll the page/a container.
@@ -256,27 +250,17 @@ def t_scroll(args):
       - to = top|bottom     -> scroll window (or container by/value) to that edge
       - dx/dy given         -> window.scrollBy(dx, dy)
     """
-    d = SESSION.ensure()
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
     frame = args.get("frame")
-    SESSION._apply_frame(frame)
     to = args.get("to")
-    if args.get("value") and not to:
-        el = SESSION.find(args["by"], args["value"], frame, args.get("timeout", 10))
-        d.execute_script("arguments[0].scrollIntoView(true);", el)
-        return text_result(f"scrolled into view: {args['by']}={args['value']}")
-    if to in ("top", "bottom"):
-        if args.get("value"):
-            el = SESSION.find(args["by"], args["value"], frame, args.get("timeout", 10))
-            pos = "0" if to == "top" else "arguments[0].scrollHeight"
-            d.execute_script(f"arguments[0].scrollTop = {pos};", el)
-            return text_result(f"scrolled container to {to}")
-        y = "0" if to == "top" else "document.body.scrollHeight"
-        d.execute_script(f"window.scrollTo(0, {y});")
-        return text_result(f"scrolled page to {to}")
-    dx = int(args.get("dx", 0))
-    dy = int(args.get("dy", 0))
-    d.execute_script("window.scrollBy(arguments[0], arguments[1]);", dx, dy)
-    return text_result(f"scrolled by ({dx},{dy})")
+    el = None
+    if args.get("value"):
+        el = backend.find(args["by"], args["value"], frame, args.get("timeout", 10))
+    message = backend.scroll(frame, el, to, int(args.get("dx", 0)), int(args.get("dy", 0)))
+    if el is not None and not to:
+        message += f": {args['by']}={args['value']}"
+    return text_result(message)
 
 
 def _upload_target(path, upload_dir):
@@ -330,19 +314,24 @@ def t_upload(args):
 
 @tool(
     "ie_js",
-    "Execute JavaScript in the page or a frame and return the result.",
+    "Execute JavaScript in the page or a frame and return the result. Over COM (target "
+    "hwnd:/tab:) the script runs as a function body in the frame's own window: write ES3 "
+    "(no JSON, let, arrow functions), return a primitive or an array (arrays come back joined "
+    "with the character U+001E); a script error is reported, never sent to the page's onerror.",
     {
         "type": "object",
         "properties": {
             "script": {"type": "string"},
             "frame": {"type": ["string", "integer"]},
             "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["script"],
     },
+    needs_driver=uses_driver,
 )
 def t_js(args):
-    d = SESSION.ensure()
-    SESSION._apply_frame(args.get("frame"))
-    res = d.execute_script(args["script"])
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    res = backend.js(args["script"], args.get("frame"), [])
     return text_result(json.dumps(res, default=str)[: args.get("limit", 8000)])

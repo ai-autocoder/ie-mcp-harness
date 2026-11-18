@@ -113,10 +113,11 @@ asserts it, and `ie_browsers` shows what is running.
 ## Architecture
 
 Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the package below.
-Modules the later tasks add (`backends.py`, `png.py`, `win32/capture.py`, `capture/`, further
-`tools/` modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
-`win32/windows.py` and `win32/htmldoc.py` exist (Task 7). Keep this section in sync with the
-plan and the code.
+Modules the later tasks add (`png.py`, `win32/capture.py`, `capture/`, further `tools/`
+modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
+`win32/windows.py` and `win32/htmldoc.py` exist (Task 7); `backends.py`, the `com_*.js`
+scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8). Keep this section
+in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
 `from ie_mcp.config import SETTINGS`), so tests can replace it. Tools register themselves with
@@ -130,7 +131,8 @@ ie_mcp/
   protocol.py        JSON-RPC loop (one thread per tools/call), @tool registry, run_tool watchdog
                      (call_budget, BUSY/BLOCKED, CALL_CONTEXTS, MODAL_PROBE notices, POST_HOOKS, AFTER_CALL)
   session.py         IeSession, build_options, SessionLease, process tracking/cleanup, DRIVER_LOCK (plain Lock)
-  backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); resolve_backend
+  backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); target_kind, resolve_backend,
+                     DEFAULT_TARGET, ATTACHED_CHAINS, TAB_ANCESTOR_CLASS (None: D15 = ie-server), js_literal
   png.py             encode_png (stdlib zlib)
   win32/
     processes.py     process_identity (image + creation time), snapshot (2 s cache; fresh=True skips it), process_tree
@@ -143,7 +145,9 @@ ie_mcp/
     redact.py        Redactor (name-segment matching, value masking)
     proxy.py         RecordingProxy, loader_tag, is_document_request, find_insertion_point
     console.py       ConsoleRecord, ConsoleStore, parse_records
-  js/                ES3 scripts: select.js, grid.js, ready_probe.js, frames.js, instrument.js, hook.js, drain.js
+  js/                ES3 scripts: select.js, grid.js, ready_probe.js, frames.js, com_run.js, com_frame.js,
+                     com_prelude.js (COM request runner, frame resolution, locator/event helpers),
+                     instrument.js, hook.js, drain.js
   tools/             navigation.py, read.py, interact.py, dialogs.py, windows.py, network.py,
                      console.py, attach.py, diagnostics.py
 ie_mcp_fixtures/
@@ -154,7 +158,8 @@ scripts/
   run_integration.py integration runner (sets env, fails on skips)
 tests/
   test_*.py          unit tests (mocked, no browser)
-  integration/       it_*.py real IE-mode tests against the fixture site
+  integration/       base.py (IntegrationTestCase: fixture server, call/text via protocol.handle,
+                     restart_session, asserts recorded PIDs gone); it_*.py real IE-mode tests
 ```
 
 Key design points. These describe the **target state** the plan builds; until a task lands,
@@ -164,13 +169,28 @@ the upstream code behaves as before:
   session is recreated). Parallel agents use different `IE_SESSION_ID`s.
 - **Two backends.** `DriverBackend` (Selenium) is the default. `ComBackend` reaches an IE
   document directly through `WM_HTML_GETOBJECT` on its `Internet Explorer_Server` window. It
-  serves modal dialogs the driver cannot reach and tabs the user opened. Wait loops re-read
-  the document before every poll, and a tab's server window is found again after a navigation.
+  serves modal dialogs the driver cannot reach and tabs the user opened. Wait loops call
+  `backend.refresh()` before every poll and treat a missing document as not ready until the
+  timeout. A `tab:` target resolves its server window again on every call and never falls back
+  to the top window (it raises "call ie_tabs and ie_attach again").
+- **The `target` argument (plan Task 8, done).** `ie_html`, `ie_text`, `ie_js`, `ie_click`,
+  `ie_fill`, `ie_select`, `ie_get`, `ie_frames`, `ie_wait_element`, `ie_wait_text`, `ie_grid`,
+  `ie_scroll`, `ie_press_key` and `ie_hover` take an optional `target`: omitted (or
+  `backends.DEFAULT_TARGET`, set by Task 15) is the driver; `hwnd:<n>` and `tab:<n>` act over
+  COM and have `needs_driver` False. Over COM every DOM access is script (D7): the request runs
+  as `new Function(S)` inside `execScript`, a frame path is resolved in script and run in the
+  frame window, results come back through the window expandos `__iemcp_r`/`__iemcp_e` (cleared
+  again after each read), element handles carry their locator and are re-resolved in each
+  script, and input is synthetic (script events, a timer click, posted `WM_KEYDOWN`/`WM_KEYUP`
+  in documentMode 7+). Locators: id, name, tag, class, link_text, css (documentMode 8+); no
+  xpath. `ie_html` over COM returns `outerHTML` (no doctype).
 - **COM lifetime.** The tool-call worker thread enters one COM apartment (`com_apartment()`)
   for the whole call, and every hook sub-thread enters its own. A `ComBackend` is created per
   call (or per hook thread), and **no COM object outlives the thread that obtained it**. The
-  modal probe is Win32-only and never touches COM. Read COM expandos with `getattr(win, "__iemcp_r")`, because Python mangles `__names`
-  written inside a class.
+  modal probe is Win32-only and never touches COM. Read COM expandos with
+  `IDispatchEx.GetDispID(name, 1)` + `InvokeEx` (D7: `getattr` fails in documentMode 11), and
+  never with attribute syntax inside a class: Python mangles `__names`. `ComBackend` refuses
+  use from a thread other than the one that created it.
 - **No tool call may hang the server (plan Task 6, done).** `handle()` routes every
   `tools/call` through `protocol.run_tool`; `serve()` only adds threading (one thread per
   `tools/call`, responses written under a lock, possibly out of order; at EOF it waits for the
@@ -316,7 +336,19 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 - Over COM, a documentMode 11 document hides window expandos and DOM methods from win32com's
   dynamic dispatch (`getattr` fails; mode 7 works; modes 8–10 untested). Run everything as
   script through `execScript` and read results
-  with `IDispatchEx.GetDispID(name, fdexNameCaseSensitive)` + `InvokeEx` (spike D7).
+  with `IDispatchEx.GetDispID(name, fdexNameCaseSensitive)` + `InvokeEx` (spike D7). Reach
+  `parentWindow` and `execScript` through the raw dispatch (`GetIDsOfNames` + `Invoke`). JScript
+  numbers come back as doubles (`11.0`).
+- In a documentMode 7 document `eval('(function(){...})')` returns `undefined`, so COM requests
+  run their body with `new Function`. The frame windows of a mode-7 top expose no `eval` or
+  `Function` to script but do expose `execScript`; in mode 11 `eval` exists and `execScript` is
+  not visible from script (it is on the COM `IHTMLWindow2`). Task 8 measured both.
+- Posted key messages for extended keys (arrows, Home, End, PageUp/PageDown, Insert, Delete)
+  need bit 24 set in `lParam`.
+- `ie_frames` index order (document order of frame + iframe elements) equals the driver's
+  `switch_to.frame(index)` order and COM `window.frames[index]` (Task 8, frameset.htm).
+- A second driver `clear()` on the same field can fail with "JavaScript error clearing the
+  element" (seen in Task 8; not yet explained).
 - Script dialogs are `#32770` windows owned by an `Alternate Modal Top Most` helper window (no
   owner of its own, same process), not by the browser window; inside a `showModalDialog`
   window they are owned by its `Internet Explorer_TridentDlgFrame`. A `confirm` is a TaskDialog

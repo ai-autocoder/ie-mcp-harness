@@ -1,12 +1,12 @@
 """Tools that read the page: text, html, element values, frames, grids, screenshots, waits."""
 import json
 import re
-import time
 from pathlib import PureWindowsPath
 
 from ie_mcp import config, js
+from ie_mcp.backends import TARGET_SCHEMA, resolve_backend, uses_driver
 from ie_mcp.protocol import image_result, locator_budget, text_result, tool, wait_budget
-from ie_mcp.session import SESSION, log
+from ie_mcp.session import SESSION, Cancelled, log
 
 # Defaults of the wait tools; each watchdog budget is computed from the same values.
 WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL = 45, 2
@@ -37,39 +37,34 @@ def _parse_ready(raw):
         "properties": {
             "frame": {"type": ["string", "integer"], "description": "frame index or name (optional)"},
             "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
         },
     },
+    needs_driver=uses_driver,
 )
 def t_text(args):
-    from selenium.webdriver.common.by import By
-    d = SESSION.ensure()
-    SESSION._apply_frame(args.get("frame"))
-    try:
-        txt = d.find_element(By.TAG_NAME, "body").text
-    except Exception:
-        # Selenium's text atom fails on Trident; plain innerText still works.
-        txt = d.execute_script("return document.body.innerText")
-    limit = args.get("limit", 8000)
-    return text_result(("" if txt is None else str(txt))[:limit])
+    txt = resolve_backend(args.get("target")).text(args.get("frame"))
+    return text_result(txt[:args.get("limit", 8000)])
 
 
 @tool(
     "ie_html",
-    "Get the HTML source of the page or of a specific frame.",
+    "Get the HTML source of the page or of a specific frame. Over COM (target hwnd:/tab:) it is "
+    "the document's outerHTML (no doctype, markup as the engine normalised it), not the "
+    "original source the driver returns.",
     {
         "type": "object",
         "properties": {
             "frame": {"type": ["string", "integer"]},
             "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
         },
     },
+    needs_driver=uses_driver,
 )
 def t_html(args):
-    d = SESSION.ensure()
-    SESSION._apply_frame(args.get("frame"))
-    html = d.page_source
-    limit = args.get("limit", 12000)
-    return text_result(html[:limit])
+    html = resolve_backend(args.get("target")).html(args.get("frame"))
+    return text_result(html[:args.get("limit", 12000)])
 
 
 @tool(
@@ -85,52 +80,31 @@ def t_html(args):
             "frame": {"type": ["string", "integer"]},
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
             "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["by", "value"],
     },
     budget=locator_budget(),
+    needs_driver=uses_driver,
 )
 def t_get(args):
-    """Read an element's text, value, or a named attribute via direct JS.
-
-    (el.text / el.get_attribute use IEDriver's JS atoms, which fail on the legacy
-    engine; arguments[0].innerText/value/getAttribute is simple enough to work.)
-    """
-    d = SESSION.ensure()
-    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
-    what = args.get("attr", "text")
-    try:
-        if what == "text":
-            out = d.execute_script("return arguments[0].innerText;", el)
-        elif what == "value":
-            out = d.execute_script("return arguments[0].value;", el)
-        else:
-            out = d.execute_script("return arguments[0].getAttribute(arguments[1]);", el, what)
-    except Exception:
-        out = el.text if what == "text" else el.get_attribute(what)
-    return text_result("" if out is None else str(out)[: args.get("limit", 4000)])
+    """Read an element's text, value, or a named attribute via direct JS (see the backends)."""
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    out = backend.get(el, args.get("attr", "text"))
+    return text_result(out[: args.get("limit", 4000)])
 
 
 @tool(
     "ie_frames",
     "List the frames/iframes of the current page (index, name, id, src). "
     "Use the index or name with the 'frame' arg of other tools.",
-    {"type": "object", "properties": {}},
+    {"type": "object", "properties": {"target": TARGET_SCHEMA}},
+    needs_driver=uses_driver,
 )
 def t_frames(args):
-    d = SESSION.ensure()
-    d.switch_to.default_content()
-    # frames.js reads name/id/src from the frame elements of the top document (Selenium's
-    # get_attribute atom fails on Trident) and returns a delimited string.
-    raw = d.execute_script(js.load("frames.js"))
-    out = []
-    for record in (raw or "").split("\x1e"):
-        if record == "":
-            continue
-        fields = record.split("\x1f") + [""] * 4
-        out.append({"index": int(fields[0]), "name": fields[1], "id": fields[2],
-                    "src": fields[3]})
-    return text_result(json.dumps(out, indent=2))
+    return text_result(json.dumps(resolve_backend(args.get("target")).frames(), indent=2))
 
 
 @tool(
@@ -146,8 +120,10 @@ def t_frames(args):
             "headers": {"type": "array", "items": {"type": "string"}, "description": "explicit column names (optional)"},
             "limit": {"type": "integer", "description": "max rows (default 500)"},
             "out_limit": {"type": "integer", "description": "max output chars (default 12000)"},
+            "target": TARGET_SCHEMA,
         },
     },
+    needs_driver=uses_driver,
 )
 def t_grid(args):
     """Extract a tabular grid as structured rows (header-keyed dicts when possible).
@@ -156,30 +132,11 @@ def t_grid(args):
     table element id via `table_id` to target a specific grid. Returns headers + rows;
     if `headers` is given (or detected) and matches the column count, rows become dicts.
     """
-    d = SESSION.ensure()
-    SESSION._apply_frame(args.get("frame"))
-    raw = d.execute_script(js.load("grid.js"), args.get("table_id"))
-    if not raw:
-        return text_result(json.dumps({"rows": 0, "note": "no table found"}))
-    grid = [r.split("\x1f") for r in raw.split("\x1e") if r != ""]
-    grid = [r for r in grid if any(c.strip() for c in r)]  # drop spacer/empty rows
-    headers = args.get("headers")
-    if not headers and grid:
-        # detect header row: first row whose cells are all non-empty & non-numeric-ish
-        first = grid[0]
-        if first and all(c.strip() and not c.strip().isdigit() for c in first):
-            headers = first
-            grid = grid[1:]
-    limit = args.get("limit", 500)
-    grid = grid[:limit]
-    if headers and all(len(r) == len(headers) for r in grid):
-        rows = [dict(zip(headers, r)) for r in grid]
-    else:
-        rows = grid  # fall back to arrays
-    return text_result(json.dumps(
-        {"columns": len(headers) if headers else (len(grid[0]) if grid else 0),
-         "headers": headers, "row_count": len(rows), "rows": rows},
-        ensure_ascii=False, indent=2)[: args.get("out_limit", 12000)])
+    grid = resolve_backend(args.get("target")).grid(
+        args.get("frame"), args.get("table_id"), args.get("headers"), args.get("limit", 500))
+    if "note" in grid:
+        return text_result(json.dumps(grid))
+    return text_result(json.dumps(grid, ensure_ascii=False, indent=2)[: args.get("out_limit", 12000)])
 
 
 # Windows opens these names as devices whatever the extension ("nul.png" is NUL).
@@ -272,10 +229,12 @@ def t_screenshot(args):
             "interval": {"type": "number", "description": "poll seconds (default 2)"},
             "case_insensitive": {"type": "boolean"},
             "gone": {"type": "boolean", "description": "wait for the substring to DISAPPEAR instead of appear (e.g. a spinner)"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["contains"],
     },
     budget=wait_budget(WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL),
+    needs_driver=uses_driver,
 )
 def t_wait_text(args):
     """Poll until `contains` appears (or, with gone=True, disappears) in a frame.
@@ -284,8 +243,8 @@ def t_wait_text(args):
     success condition is the substring present in some frame; with gone=True it is
     the substring absent from every scanned frame (e.g. a spinner disappearing).
     """
-    from selenium.webdriver.common.by import By
-    d = SESSION.ensure()
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
     needle = args["contains"]
     ci = args.get("case_insensitive", True)
     if ci:
@@ -299,54 +258,62 @@ def t_wait_text(args):
     last = ""
     while True:
         SESSION.check_cancel()  # outside the try below: not a transient failure
-        # A whole round can fail transiently while the app navigates (IEDriver
-        # briefly reports "Unable to get browser"); treat that as "not yet".
+        # A whole round can fail transiently while the app navigates (IEDriver briefly reports
+        # "Unable to get browser"; over COM there may be no document yet): treat that as "not yet".
         found_in = None
+        matched = False  # found_in is None for a page without frames, so it cannot say "found"
         round_ok = False
         try:
-            d.switch_to.default_content()
+            backend.refresh()  # re-read the document before every poll (a navigation may have replaced it)
             if frame is not None and frame != "":
                 candidates = [frame]
             else:
-                n = len(d.find_elements(By.TAG_NAME, "frame") + d.find_elements(By.TAG_NAME, "iframe"))
+                n = len(backend.frames())
                 candidates = list(range(n)) if n else [None]
+            readable = 0
+            read_error = None
             for cand in candidates:
-                d.switch_to.default_content()
                 try:
-                    if cand is not None:
-                        SESSION._apply_frame(cand)
-                    txt = d.find_element(By.TAG_NAME, "body").text
-                except Exception:
+                    txt = backend.text(cand)
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    # Kept for the report: no document, a frame that cannot be read, ...
+                    read_error = (str(exc).splitlines() or [repr(exc)])[0]
                     continue
+                readable += 1
                 hay = txt.lower() if ci else txt
                 if needle in hay:
                     found_in = cand
+                    matched = True
                     last = txt
                     break
                 last = txt
-            round_ok = True
+            # A round where no frame could be read says nothing about the text: not "gone".
+            round_ok = readable > 0
+            if not round_ok:
+                last = f"(transient: {read_error or 'no frame could be read'})"
+        except Cancelled:
+            raise
         except Exception as exc:
-            last = f"(transient: {str(exc).splitlines()[0]})"
+            last = f"(transient: {(str(exc).splitlines() or [repr(exc)])[0]})"
 
         if round_ok:
-            if not gone and found_in is not None:
-                d.switch_to.default_content()
+            if not gone and matched:
+                backend.reset_frame()
                 return text_result(json.dumps({
                     "ok": True, "found": True, "frame": found_in,
                     "after_seconds": elapsed, "preview": last[:600],
                 }, indent=2))
-            if gone and found_in is None:
-                d.switch_to.default_content()
+            if gone and not matched:
+                backend.reset_frame()
                 return text_result(json.dumps({
                     "ok": True, "gone": True, "after_seconds": elapsed,
                 }, indent=2))
         if elapsed >= timeout:
-            try:
-                d.switch_to.default_content()
-            except Exception:
-                pass
+            backend.reset_frame()
             return text_result(json.dumps({
-                "ok": False, "found": found_in is not None, "after_seconds": elapsed,
+                "ok": False, "found": matched, "after_seconds": elapsed,
                 "timed_out": True, "last_preview": last[:600],
             }, indent=2))
         SESSION.pause(interval)
@@ -445,10 +412,12 @@ def t_wait_ready(args):
             "timeout": {"type": "number", "description": "max seconds (default 20)"},
             "interval": {"type": "number"},
             "gone": {"type": "boolean", "description": "wait for it to disappear instead"},
+            "target": TARGET_SCHEMA,
         },
         "required": ["by", "value"],
     },
     budget=wait_budget(WAIT_ELEMENT_TIMEOUT, WAIT_ELEMENT_INTERVAL),
+    needs_driver=uses_driver,
 )
 def t_wait_element(args):
     """Wait for an element (by/value) to appear — or, with gone=True, to disappear."""
@@ -458,27 +427,34 @@ def t_wait_element(args):
     timeout = args.get("timeout", WAIT_ELEMENT_TIMEOUT)
     interval = args.get("interval", WAIT_ELEMENT_INTERVAL)
     gone = args.get("gone", False)
-    d = SESSION.ensure()
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
     elapsed = 0
     while True:
         SESSION.check_cancel()
         present = False
+        last_error = None
         try:
-            SESSION._apply_frame(frame)
-            present = len(d.find_elements(SESSION._by(by), value)) > 0
-        except Exception:
+            backend.refresh()  # re-read the document before every poll
+            backend.find(by, value, frame, 0)
+            present = True
+        except (Cancelled, ValueError):
+            raise  # a usage error (xpath over COM, css below documentMode 8) never gets better
+        except Exception as exc:
             present = False
-        if (not gone and present) or (gone and not present):
-            try:
-                d.switch_to.default_content()
-            except Exception:
-                pass
+            # Not found is the normal "not yet"; anything else (no document, a frame that
+            # cannot be read) is kept so a timeout can say why.
+            if not isinstance(exc, LookupError):
+                last_error = (str(exc).splitlines() or [repr(exc)])[0]
+        if (not gone and present) or (gone and not present and last_error is None):
+            backend.reset_frame()
             return text_result(json.dumps({
                 "ok": True, "present": present, "after_seconds": elapsed,
             }))
         if elapsed >= timeout:
-            return text_result(json.dumps({
-                "ok": False, "present": present, "after_seconds": elapsed, "timed_out": True,
-            }))
+            report = {"ok": False, "present": present, "after_seconds": elapsed, "timed_out": True}
+            if last_error:
+                report["last_error"] = last_error
+            return text_result(json.dumps(report))
         SESSION.pause(interval)
         elapsed += interval
