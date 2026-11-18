@@ -375,8 +375,9 @@ class WatchdogTests(WatchdogTestCase):
         self.assertEqual(content[0]["text"], "clicked")
         self.assertEqual(
             content[-1]["text"],
-            'NOTICE: html_dialog open: Lookup (hwnd 42). Use ie_windows; act in it with '
-            'target="hwnd:42" or ie_switch_window.')
+            'NOTICE: html_dialog open: Lookup (hwnd 42). Act in it with ie_switch_window or '
+            'target="hwnd:42"; ie_windows lists every window; ie_dialog answers a script '
+            'alert or confirm.')
 
     def test_notice_has_one_item_per_window_and_follows_errors_and_blocks(self):
         def boom(args):

@@ -216,8 +216,8 @@ def _probe():
 def _notice(window):
     hwnd = window.get("hwnd")
     return (f"NOTICE: {window.get('kind', 'window')} open: {window.get('title', '')} "
-            f"(hwnd {hwnd}). Use ie_windows; act in it with target=\"hwnd:{hwnd}\" "
-            f"or ie_switch_window.")
+            f"(hwnd {hwnd}). Act in it with ie_switch_window or target=\"hwnd:{hwnd}\"; "
+            f"ie_windows lists every window; ie_dialog answers a script alert or confirm.")
 
 
 def _with_notices(result, windows):

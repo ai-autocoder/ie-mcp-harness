@@ -116,8 +116,10 @@ Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the pa
 Modules the later tasks add (`png.py`, `win32/capture.py`, `capture/`, further `tools/`
 modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
 `win32/windows.py` and `win32/htmldoc.py` exist (Task 7); `backends.py`, the `com_*.js`
-scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8). Keep this section
-in sync with the plan and the code.
+scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
+`win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
+exist (Task 9). Keep
+this section in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
 `from ie_mcp.config import SETTINGS`), so tests can replace it. Tools register themselves with
@@ -139,6 +141,9 @@ ie_mcp/
     windows.py       ctypes only: enumerate_windows, classify, modal_probe (visible windows only, no COM), session_window_pids,
                      ATTACHED_TOPS, pick_main_hwnd (ie_mode_tabs comes with Task 15)
     htmldoc.py       com_apartment, com_call (retries rejected calls), ie_server_child, document_from_hwnd, document_url (pywin32, lazy)
+    messages.py      the only module that posts window messages (post_message, WM_COMMAND/WM_CLOSE) + is_window, get_text (ctypes)
+    dialogs.py       the safety gate: confirm_script_dialog (session window + helper/dialog-frame owner + exact direct-child
+                     shape), the Q8 shape tables, post_command, wait_gone; review this file alone (no tool code)
     capture.py       PrintWindow capture, DPI awareness
   capture/
     store.py         NetworkEntry, CaptureStore
@@ -148,8 +153,8 @@ ie_mcp/
   js/                ES3 scripts: select.js, grid.js, ready_probe.js, frames.js, com_run.js, com_frame.js,
                      com_prelude.js (COM request runner, frame resolution, locator/event helpers),
                      instrument.js, hook.js, drain.js
-  tools/             navigation.py, read.py, interact.py, dialogs.py, windows.py, network.py,
-                     console.py, attach.py, diagnostics.py
+  tools/             navigation.py, read.py, interact.py, windows.py (ie_windows, ie_switch_window, ie_close_window),
+                     dialogs.py (ie_dialog), network.py, console.py, attach.py, diagnostics.py
 ie_mcp_fixtures/
   server.py          start_fixture_server (origins 127.0.0.1 and localhost), requests log, python -m ie_mcp_fixtures
   site/              legacy fixture pages
@@ -217,6 +222,30 @@ the upstream code behaves as before:
   spike D8). `double`/`right` always use the driver. The post-call hooks are skipped for a
   call that queued its effect: `ToolSpec.defers_effect` (set by `ie_click` from the click's
   effective mode, explicit `mode` else `IE_CLICK_MODE`; default `args["mode"] == "async"`).
+- **Window and dialog tools (plan Task 9, done).** `ie_windows` (`needs_driver=False`) lists
+  `enumerate_windows(..., with_url=True)` with an `hwnd:<n>` target for every page window and
+  dialog; only when `MODAL_PROBE()` is empty and `driver_hold` gets the lock within 0.5 s does it
+  add `driver_handle`/`current` (matched by title prefix, then URL; it switches through every
+  handle and always back). `ie_switch_window` (handle | title_contains | main) retries for 5 s,
+  because IEDriver lists a new window late. `ie_close_window`: `hwnd:<n>` closes over COM
+  (`ComBackend.close_window`, `parentWindow.close()`), else `WM_CLOSE`; a driver handle is
+  switched to, closed, and the driver goes back to main; main, attached tops and system dialogs
+  are refused. **Never send a message to a `#32770` that `win32/dialogs.confirm_script_dialog` has
+  not proven:** it must be a `script_dialog` of the session (owner chain), visible, a `#32770`,
+  have an IMMEDIATE owner of class `Alternate Modal Top Most` (in the session PIDs) or
+  `Internet Explorer_TridentDlgFrame` (D6/Q8; a system dialog is owned by the browser's top window),
+  and have exactly the control set (DIRECT children, `windows.enum_children`) of a classic alert
+  (Button 2, Static 20, Static 65535), a classic confirm (Button 1, Button 2, Static 20,
+  Static 65535) or a TaskDialog (DirectUIHWND 0); a prompt's sets (with and without the Button
+  57089 check box) pass only for closing. Remaining risk: an `onbeforeunload` TaskDialog may be
+  helper-owned with the same shape; Task 12 must require a `dialog-open` record before a
+  TaskDialog is accepted. Messages are posted (never sent)
+  through `win32/messages.py`. `ie_dialog` is `needs_driver=lambda a: a.get("target") is None`;
+  a target other than `hwnd:<n>` is refused before the lock. Without a target it tries the
+  driver alert, but skips it while a modal HTML dialog is open (a driver call can block) and
+  answers an owned alert/confirm window instead; a prompt is answered only by the driver alert
+  (`dialogs.PROMPT_DRIVER_REACH` records D14), so a prompt inside a modal dialog gets "prompt not
+  reachable: ask the user". Without a session `ie_dialog` no longer starts a browser.
 - **Post-call instrumentation** is one `execute_script` from the top document that walks the
   same-origin frames in JS. It holds the driver lock until it returns, and it is skipped while
   a dialog is open or after an async click.
@@ -347,6 +376,29 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
   need bit 24 set in `lParam`.
 - `ie_frames` index order (document order of frame + iframe elements) equals the driver's
   `switch_to.frame(index)` order and COM `window.frames[index]` (Task 8, frameset.htm).
+- IE shows a script dialog in one of two forms. The first dialog of a page is a classic
+  MessageBox (alert: Button 2; confirm: Buttons 1 and 2; both with Static 20 and Static 65535,
+  so the message is readable); a later dialog of the same page is a TaskDialog with the "don't
+  let this page create more messages" check box (one `DirectUIHWND` direct child with about a
+  dozen hidden descendants; no readable message; a prompt then also has Button 57089). Spike Q8
+  recorded one of each; an alert can be either. Always compare the direct children, never all
+  descendants. OK is control 1 and Cancel 2 in a confirm and a TaskDialog; a classic alert
+  closes with 2.
+- With `unhandledPromptBehavior=ignore`, driver commands raise `UnexpectedAlertPresentException`
+  while a dialog is open. `IeSession.ensure()` treats that as a live browser; before, its liveness
+  probe took it for a dead session and recreated the browser, destroying the open dialog.
+- Integration tests must never leave a browser behind: `tests/integration/base.py` remembers every
+  (pid, identity) the session ever had (it can be recreated mid-class) and `finish_session` kills
+  any survivor by recorded identity and fails the class. Never end a run by killing the runner
+  (`timeout`, TaskStop): that is how unrecorded processes were left. Unit tests must never reach
+  `SESSION.ensure()` (it starts a real browser): patch it to raise, as `test_window_tools` does.
+- IEDriver lists a new pop-up or `showModalDialog` window in `window_handles` about a second
+  after the window exists (the first read after the click shows one handle, later reads two).
+  Any "find the new window" step must retry (`tools/windows.SWITCH_WAIT`).
+- A COM click is queued on the page's timer; when it closes its own window (a dialog's OK/Cancel
+  button) the window can be gone before the result is read back, and reading `__iemcp_e` fails
+  with "Member not found". `ComBackend._run` checks whether the IE server window is gone and
+  raises `WindowClosed`; `click` treats that as success.
 - A second driver `clear()` on the same field can fail with "JavaScript error clearing the
   element" (seen in Task 8; not yet explained).
 - Script dialogs are `#32770` windows owned by an `Alternate Modal Top Most` helper window (no

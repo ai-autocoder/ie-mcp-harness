@@ -36,6 +36,10 @@ class WindowInfo:
     visible: bool
     url: str = ""  # only filled when the caller asks (with_url=True); never by the probe
     is_prompt: bool = False
+    # Class and process of the window's immediate owner ("" / None when it has none or it is
+    # not a top-level window). A script dialog is owned by the helper or dialog frame (D6/Q8).
+    owner_cls: str = ""
+    owner_pid: Optional[int] = None
 
 
 @dataclass
@@ -91,6 +95,8 @@ def _user32():
         u.GetWindow.restype = wintypes.HWND
         u.IsWindowVisible.argtypes = [wintypes.HWND]
         u.IsWindowVisible.restype = wintypes.BOOL
+        u.GetParent.argtypes = [wintypes.HWND]
+        u.GetParent.restype = wintypes.HWND
         u.GetDlgCtrlID.argtypes = [wintypes.HWND]
         u.GetDlgCtrlID.restype = ctypes.c_int
         _user32_api = u
@@ -142,6 +148,19 @@ def enum_descendants(hwnd):
         return []
     return [RawChild(h, class_name(h), int(u.GetDlgCtrlID(h)), bool(u.IsWindowVisible(h)))
             for h in _collect(u.EnumChildWindows, hwnd)]
+
+
+def enum_children(hwnd):
+    """The direct children of ``hwnd`` (its descendants whose parent is ``hwnd``), as ``RawChild``.
+
+    Quirk (seen live): a script dialog shaped as a TaskDialog has one direct child, a
+    ``DirectUIHWND``, but a dozen hidden descendants inside it (``CtrlNotifySink``,
+    ``ScrollBar``, ``SysLink``, a ``Button``). Spike Q8's shapes are the direct children.
+    """
+    u = _user32()
+    if u is None:
+        return []
+    return [c for c in enum_descendants(hwnd) if int(u.GetParent(c.hwnd) or 0) == hwnd]
 
 
 def _enum_top_level():
@@ -197,6 +216,17 @@ def session_window_pids():
     """
     edge_pid = getattr(_session(), "edge_pid", None)
     return processes.process_tree(edge_pid) if edge_pid else set()
+
+
+def session_windows(with_url=False):
+    """Every window of the session as ``WindowInfo`` (``with_url`` needs a COM apartment)."""
+    return enumerate_windows(session_window_pids(), with_url=with_url,
+                             attached_tops=set(ATTACHED_TOPS))
+
+
+def find_window(hwnd, with_url=False):
+    """The session's ``WindowInfo`` for ``hwnd``, or None when it is not one of its windows."""
+    return next((w for w in session_windows(with_url) if w.hwnd == hwnd), None)
 
 
 def pick_main_hwnd(before, after, driver_title):
@@ -296,8 +326,11 @@ def enumerate_windows(pids, enum_fn=None, with_url=False, attached_tops=None):
         prompt = _is_prompt(w)
         kind = classify(w.cls, _has_ie_server(w) if w.cls != SCRIPT_DIALOG_CLASS else False,
                         owner_in_session, w.hwnd, main_hwnd, is_prompt=prompt)
+        owner = by_hwnd.get(w.owner) if w.owner else None
         info = WindowInfo(hwnd=w.hwnd, pid=w.pid, cls=w.cls, title=w.title, kind=kind,
-                          owner_hwnd=w.owner, visible=w.visible, url="", is_prompt=prompt)
+                          owner_hwnd=w.owner, visible=w.visible, url="", is_prompt=prompt,
+                          owner_cls=owner.cls if owner else "",
+                          owner_pid=owner.pid if owner else None)
         if with_url and kind in ("main", "popup", "html_dialog"):
             info.url = _read_url(w)
         out.append(info)

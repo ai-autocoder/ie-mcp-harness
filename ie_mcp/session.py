@@ -703,11 +703,18 @@ class IeSession:
         session creation (the only reliable way into IE mode). The lease is taken once and
         held across every retry; only ``close()`` releases it.
         """
-        from selenium.common.exceptions import WebDriverException
+        from selenium.common.exceptions import (UnexpectedAlertPresentException,
+                                                WebDriverException)
 
         if self.driver is not None:
             try:
                 _ = self.driver.current_url  # cheap liveness probe
+                return self.driver
+            except UnexpectedAlertPresentException:
+                # With unhandledPromptBehavior=ignore an open alert/confirm/prompt makes
+                # commands fail with this error. The browser is alive and the dialog is what
+                # the caller wants to see: recreating the session here would kill it (and the
+                # page's state) for every tool that calls ensure() while a dialog is open.
                 return self.driver
             except WebDriverException:
                 log("session dead, recreating")

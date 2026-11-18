@@ -210,7 +210,10 @@ All configuration is via environment variables — **all optional**:
 | `ie_click` | Click an element (auto-waits); `click` / `double` / `right`. `mode` is `driver` (default; set by `IE_CLICK_MODE`) or `async`: the click is queued on the page's own timer, so the call does not wait for the click's handlers (only the usual `wait` pause follows) and cannot block even if the click opens a dialog that blocks a driver click. An async click is **script-initiated**: no mousedown/mouseup/focus, and the pop-up blocker may block a `window.open` it triggers. `double`/`right` always use the driver. |
 | `ie_fill` | Type text into an input/textarea (auto-waits). |
 | `ie_upload` | Set a `<input type=file>` by sending a local path; only files inside `IE_UPLOAD_DIR` (disabled when unset). |
-| `ie_dialog` | Handle a JS dialog (`accept` / `dismiss` / `text` / `sendkeys`). |
+| `ie_dialog` | Handle a script dialog (`accept` / `dismiss` / `text` / `sendkeys`). Without `target` it uses the driver's alert, then a script alert/confirm window of the session. With `target="hwnd:<n>"` it needs no driver: it presses that window's button, but only after proving it is the session's own alert or confirm (see below). |
+| `ie_windows` | List the session's windows as JSON (`hwnd`, `target`, `kind`: main / popup / html_dialog / script_dialog / system_dialog, title, url, owner, `is_prompt`). When no modal is open and the browser is free it adds each page window's `driver_handle` and `current`. Works while a dialog is open and never waits for a busy browser. |
+| `ie_switch_window` | Make a driver window (pop-up, `showModalDialog` window) the one the other tools act on: `handle`, `title_contains` or `main=true`. Returns the new title and URL. |
+| `ie_close_window` | Close a pop-up or modal dialog by `hwnd:<n>` (`window.close()` over COM, else `WM_CLOSE`) or by driver handle. Refuses the main window (`ie_close`), an attached tab (`ie_detach`) and system dialogs. |
 | `ie_js` | Execute JavaScript in the page or a frame and return the result. |
 | `ie_screenshot` | PNG screenshot of the window, or of a single element. `save_path` must be a bare file name; it is saved in `<session dir>\screenshots\` and kept after `ie_close`. |
 | `ie_wait_text` | Poll until a substring appears (or disappears) in the page text. |
@@ -246,6 +249,33 @@ dialog blocks it. Over COM:
 
 A `tab:` target never falls back to another tab: when the attached tab is gone the call fails
 and asks you to attach again.
+
+### Dialogs, pop-ups and system dialogs
+
+Windows a page opens are of four kinds. A **pop-up** (`window.open`) and a **modal HTML dialog**
+(`showModalDialog`) are pages: list them with `ie_windows`, then read and act in them either
+with `ie_switch_window` (the driver) or with `target="hwnd:<n>"` (COM, no driver needed). Both
+ways work; the `hwnd` way also works while the driver is blocked. `ie_close_window` closes
+them. A **script dialog** (`alert`, `confirm`, `prompt`) is answered with `ie_dialog`.
+
+- `ie_dialog` without `target` asks the driver's alert first. While a modal HTML dialog is
+  open it skips the driver (that call can block) and answers a script dialog window instead.
+- `ie_dialog target="hwnd:<n>"` sends `WM_COMMAND` to the dialog's own button, but only after
+  checking that the window belongs to the session, that its immediate owner is the browser's
+  dialog helper or a `showModalDialog` window (a system dialog is owned by the browser window),
+  and that its direct controls are exactly those of a script alert or confirm: the classic
+  form (icon, message, one OK button for an alert, OK and Cancel for a confirm) or the
+  TaskDialog form IE uses for a later dialog of the same page. Anything else is refused and
+  nothing is sent.
+- A **system dialog** (file open/save, print, a security or credential prompt, "leave this
+  page?") is never answered or closed: the tools report `system dialog: ask the user`.
+- The message of a dialog shown as a TaskDialog is not readable through its window (an alert
+  and a confirm look the same there); `ie_dialog action=text` asks the driver alert when exactly
+  one script dialog is open, otherwise it says the text is not readable.
+- **Limitation:** a `prompt` can only be answered through the driver alert (it has a text box).
+  A prompt raised inside a `showModalDialog` window therefore cannot be answered: `ie_dialog`
+  says `prompt not reachable: ask the user`. `ie_close_window` can still cancel it
+  (the prompt then returns `null`).
 
 ### Working with frames
 
@@ -328,11 +358,15 @@ Running straight from the clone without installing also works — `python -m ie_
 - `ie_mcp/win32/windows.py` — window enumeration and classification (main, popup, HTML dialog,
   script dialog, system dialog) and the modal probe behind the `NOTICE:`/`BLOCKED:` answers
   (ctypes only, no COM).
+- `ie_mcp/win32/messages.py` — the only code that posts window messages (`WM_COMMAND`, `WM_CLOSE`)
+  and reads a control's text (ctypes).
+- `ie_mcp/win32/dialogs.py` — the check that a `#32770` window is the session's own script
+  dialog before anything is sent to it (owner, owner class and exact controls).
 - `ie_mcp/win32/htmldoc.py` — COM access to an IE document through `WM_HTML_GETOBJECT`
   (needs the optional `pywin32` extra; the server runs without it).
 - `ie_mcp/protocol.py` — the stdio JSON-RPC loop and the `@tool` registry.
 - `ie_mcp/tools/` — one `t_*` function per tool, grouped in `navigation.py`, `read.py`,
-  `interact.py`, `dialogs.py` and `diagnostics.py`.
+  `interact.py`, `windows.py`, `dialogs.py` and `diagnostics.py`.
 - `ie_mcp/js/` — the ES3 scripts injected into the page (`select.js`, `grid.js`,
   `ready_probe.js`).
 - `ie_mcp/cli.py` — the `--install`/`--selftest` CLI and the server start-up.
@@ -409,10 +443,10 @@ no tool call can hang the server:
   action may still complete`. The call itself cannot be stopped and goes on holding the browser until
   it returns (its late result is discarded). `ie_close force=true` works at any time: it does not
   need the browser, cancels running waits and kills only this session's own Edge and IEDriver.
-- When a modal window is open after a call, the answer ends with a `NOTICE:` item naming it
-  (window tools arrive with later tasks).
-- `ie_sleep`, `ie_browsers`, `ie_kill_orphans`, `ie_status` and `ie_close force=true` never wait for the
-  browser.
+- When a modal window is open after a call, the answer ends with a `NOTICE:` item naming it and
+  how to reach it (`ie_switch_window` or `target="hwnd:<n>"`; `ie_windows` lists every window).
+- `ie_sleep`, `ie_browsers`, `ie_kill_orphans`, `ie_status`, `ie_windows`, `ie_close force=true` and
+  `ie_dialog`/`ie_close_window` with an `hwnd:` target never wait for the browser.
 
 ### Other things the server does to the driver
 

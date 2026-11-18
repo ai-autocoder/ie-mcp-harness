@@ -23,7 +23,7 @@ from typing import Optional, Protocol
 
 from ie_mcp import js
 from ie_mcp.session import SESSION, log
-from ie_mcp.win32 import htmldoc
+from ie_mcp.win32 import htmldoc, messages
 
 IE_SERVER_CLASS = htmldoc.IE_SERVER_CLASS
 
@@ -56,6 +56,10 @@ _TARGET = re.compile(r"(hwnd|tab):([0-9]+)")
 
 class OptionNotFound(ValueError):
     """The requested <option> is not in the <select>."""
+
+
+class WindowClosed(RuntimeError):
+    """The window went away while a COM request ran (the page's own script closed it)."""
 
 
 class NoSuchElement(LookupError):
@@ -556,6 +560,7 @@ class ComBackend:
         self.kind = kind
         self._owner = threading.get_ident()
         self._window_obj = None
+        self._server = None  # the IE server hwnd the document came from (to see it close)
 
     # -- the document --
     def server_hwnd(self):
@@ -586,7 +591,8 @@ class ComBackend:
             raise RuntimeError("a ComBackend can only be used by the thread that created it "
                                "(COM objects must not cross threads)")
         if self._window_obj is None:
-            document = htmldoc.document_from_hwnd(self.server_hwnd())
+            self._server = self.server_hwnd()
+            document = htmldoc.document_from_hwnd(self._server)
             self._window_obj = _com_get(document, "parentWindow")
         return self._window_obj
 
@@ -600,6 +606,19 @@ class ComBackend:
     def reset_frame(self):
         """Nothing to reset: every request names its frame."""
 
+    def close_window(self):
+        """``parentWindow.close()`` on the window's document (spike D2: COM reaches dialogs).
+
+        Called straight through the raw dispatch, not as script: after it the window is gone,
+        so no result could be read back from it. The page's own ``onbeforeunload`` or IE's
+        "close this window?" prompt can still keep it open: the caller checks that.
+        """
+        window = self._window()
+        pc = _pythoncom()
+        _com("close the window", window.Invoke, _dispid(window, "close"),
+             htmldoc.LOCALE_USER_DEFAULT, pc.DISPATCH_METHOD, False)
+        self._window_obj = None  # the document is going away: never reuse it
+
     # -- running script --
     def _run(self, body, frame=None, args=(), helpers=False):
         request = build_request(body, frame, list(args), helpers)  # validates before COM
@@ -609,6 +628,8 @@ class ComBackend:
             try:
                 error = _com_read(window, "__iemcp_e")
             except RuntimeError as exc:
+                if self._window_closed():
+                    raise WindowClosed("the window closed while the script ran") from exc
                 raise RuntimeError("the page did not run the script (it navigated or scripting "
                                    f"is off): {exc}") from exc
             if error:
@@ -620,6 +641,23 @@ class ComBackend:
         if isinstance(result, float) and result.is_integer():
             return int(result)
         return result
+
+    def _window_closed(self, wait=0.5):
+        """True when the window this backend reads is gone (checked for ``wait`` seconds).
+
+        Quirk (seen live): a click queued on the page's timer can close its own window (a
+        dialog's OK button) before the caller reads the result back, and the read then fails
+        with "Member not found". That is the click working, not the page refusing the script.
+        """
+        server = self._server
+        if server is None:
+            return False
+        deadline = time.monotonic() + wait
+        while messages.is_window(server):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+        return True
 
     @staticmethod
     def _clear(window):
@@ -696,7 +734,10 @@ class ComBackend:
             body = _EVENT_CLICK_BODY % "oncontextmenu"
         else:
             raise ValueError("action must be click|double|right")
-        self._op(el, body)
+        try:
+            self._op(el, body)
+        except WindowClosed:
+            pass  # the click closed its own window (a dialog's OK/Cancel): it worked
 
     def fill(self, el, text, clear):
         self._events_ok(self._op(el, _FILL_BODY, [str(text), bool(clear)]), "fill",

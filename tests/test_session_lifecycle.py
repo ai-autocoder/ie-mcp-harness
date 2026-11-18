@@ -157,6 +157,43 @@ class EnsureTests(LifecycleTestCase):
         self.assertIsNone(s.driver_pid)
         self.assertEqual(self.lock_owner(), os.getpid())
 
+    def test_ensure_keeps_the_session_while_an_alert_is_open(self):
+        # With unhandledPromptBehavior=ignore an open dialog makes driver commands raise
+        # UnexpectedAlertPresentException; that is a live browser, not a dead session.
+        from selenium.common.exceptions import (UnexpectedAlertPresentException,
+                                                WebDriverException)
+
+        class Failing(FakeDriver):
+            error = None
+
+            @property
+            def current_url(self):
+                raise self.error
+
+            @current_url.setter
+            def current_url(self, value):
+                pass
+
+        s = IeSession()
+        alerted = Failing(pid=10)
+        alerted.error = UnexpectedAlertPresentException("alert open")
+        s.driver = alerted
+        with mock.patch.object(s, "quit_browser") as quit_browser, \
+                mock.patch.object(s, "_build") as build:
+            self.assertIs(s.ensure(), alerted)
+            quit_browser.assert_not_called()
+            build.assert_not_called()
+
+        # Any other driver failure still means the session is dead.
+        dead = Failing(pid=11)
+        dead.error = WebDriverException("gone")
+        s.driver = dead
+        with mock.patch.object(s, "quit_browser") as quit_browser, \
+                mock.patch.object(s, "_build", return_value=FakeDriver(pid=12)) as build:
+            s.ensure(initial_url="http://127.0.0.1/")
+            quit_browser.assert_called()
+            build.assert_called()
+
     def test_ensure_records_process_identities_in_the_owner_file(self):
         s = IeSession()
         with mock.patch.object(s, "_build", return_value=FakeDriver(pid=10)), \

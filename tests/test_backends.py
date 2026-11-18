@@ -18,7 +18,7 @@ from ie_mcp import backends, config, js, protocol
 import ie_mcp.tools  # noqa: F401  (importing the package registers every tool)
 from ie_mcp.backends import ComBackend, ComElement
 from ie_mcp.session import SESSION
-from ie_mcp.win32 import htmldoc
+from ie_mcp.win32 import htmldoc, messages
 
 # The same constructs tests/test_js_resources.py forbids in the shipped scripts.
 FORBIDDEN = ["=>", "`", r"\blet\b", r"\bconst\b", r"JSON\.", r"\.forEach\(", r"\.map\(",
@@ -739,6 +739,27 @@ class OperationTests(BackendTestCase):
         self.assertIn("'ondblclick'", self.last_body())
         self.com().click(self.element, "right", "driver")
         self.assertIn("'oncontextmenu'", self.last_body())
+
+    def test_com_click_that_closes_its_window_is_not_an_error(self):
+        # The queued click closes the dialog before the caller reads the result back.
+        def gone(window, name):
+            raise RuntimeError("COM call failed (read __iemcp_e): Member not found.")
+
+        with mock.patch.object(backends, "_com_read", gone), \
+                mock.patch.object(messages, "is_window", return_value=False):
+            self.com().click(self.element, "click", "driver")  # no error
+            with self.assertRaises(backends.WindowClosed):
+                self.com().get(self.element, "text")  # a read has nothing to return
+
+    def test_com_failed_read_of_an_open_window_still_says_the_page_did_not_run_it(self):
+        def failing(window, name):
+            raise RuntimeError("Member not found.")
+
+        with mock.patch.object(backends, "_com_read", failing), \
+                mock.patch.object(messages, "is_window", return_value=True), \
+                mock.patch.object(backends.ComBackend, "_window_closed", lambda s_, wait=0.5: False):
+            with self.assertRaisesRegex(RuntimeError, "did not run the script"):
+                self.com().click(self.element, "click", "driver")
 
     def test_com_click_rejects_unknown_actions(self):
         with self.assertRaises(ValueError):

@@ -189,6 +189,16 @@ class EnumerateTests(unittest.TestCase):
         raw = [top(6, HELPER), alert(20, owner=6)]
         self.assertEqual(by_hwnd(enumerate_with(raw))[20].kind, "script_dialog")
 
+    def test_enumerate_reports_the_class_and_process_of_the_immediate_owner(self):
+        # Task 9 refuses a #32770 unless its owner is the helper or a dialog frame (D6/Q8).
+        raw = [top(1, children=[ie_child()]), top(6, HELPER), top(7, DLG_FRAME),
+               alert(20, owner=6), alert(30, owner=7), alert(40, owner=1), alert(50, owner=None)]
+        got = by_hwnd(enumerate_with(raw, main_hwnd=1))
+        self.assertEqual((got[20].owner_cls, got[20].owner_pid), (HELPER, EDGE_PID))
+        self.assertEqual(got[30].owner_cls, DLG_FRAME)
+        self.assertEqual(got[40].owner_cls, "Chrome_WidgetWin_1")
+        self.assertEqual((got[50].owner_cls, got[50].owner_pid), ("", None))
+
     def test_a_helper_of_another_process_does_not_make_an_alert_ours(self):
         raw = [top(6, HELPER, pid=OTHER_PID), alert(20, owner=6, pid=OTHER_PID)]
         self.assertEqual(enumerate_with(raw), [])
