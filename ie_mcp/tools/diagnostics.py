@@ -5,6 +5,7 @@ import time
 from ie_mcp import config
 from ie_mcp.protocol import driver_hold, number_arg, text_result, tool
 from ie_mcp.session import SESSION, cleanup_stale_sessions, list_ie_browsers
+from ie_mcp.tools import console
 
 
 SLEEP_DEFAULT = 1  # seconds, for ie_sleep and its watchdog budget
@@ -14,7 +15,8 @@ STATUS_LOCK_WAIT = 0.5  # seconds ie_status waits for the driver before reportin
 @tool(
     "ie_status",
     "Session state as JSON: active/alive, title, url, window_handles, and the "
-    "interaction mode, session identity/directory, and owned browser PIDs/profile. "
+    "interaction mode, session identity/directory, owned browser PIDs/profile, and the page "
+    "modifications: instrumented (wrappers installed), console_stub, xhr_wrapped. "
     "Never waits for a busy browser: while another call holds it, title/url/window_handles "
     "are left out and \"driver\": \"busy\" is reported.",
     {"type": "object", "properties": {}},
@@ -32,6 +34,12 @@ def t_status(args):
         "driver_pid": SESSION.driver_pid,
         "edge_pid": SESSION.edge_pid,
         "profile": SESSION.profile,
+        # Page modifications (R13): wrappers are installed once a hook has run; xhr_wrapped is
+        # the flag last sent to a page (or what the next page will get).
+        "instrumented": console.is_instrumented(),
+        "console_stub": bool(config.SETTINGS.instrument and config.SETTINGS.console_stub),
+        "xhr_wrapped": bool(config.SETTINGS.instrument and (
+            console.LAST_FLAGS or console.page_flags())["wrap_xhr"]),
     }
     if SESSION.driver is None:
         info["alive"] = False

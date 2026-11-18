@@ -9,10 +9,16 @@ Two paths (spike D2/D14):
   raised inside a ``showModalDialog`` window. It acts only on a window that
   ``ie_mcp.win32.dialogs.confirm_script_dialog`` proved to be the session's own alert or
   confirm; a system dialog is never answered.
+
+Evidence from the page (``ie_mcp.tools.console``): an answer carries the page's own
+``dialog-open`` record for the dialog when there is one, and a dialog shown as a TaskDialog is
+accepted only when such a record is pending (its message cannot be read from the window, and
+IE's "leave this page?" prompt has the same shape).
 """
 from ie_mcp import protocol
 from ie_mcp.protocol import tool
 from ie_mcp.session import SESSION, log
+from ie_mcp.tools import console as consoletools
 from ie_mcp.tools.windows import LOCK_WAIT, json_result, parse_hwnd, tool_error
 from ie_mcp.win32 import dialogs as scriptdialogs
 from ie_mcp.win32.dialogs import Refused
@@ -33,7 +39,10 @@ PROMPT_DRIVER_REACH = True
     "script_dialog from ie_windows or a NOTICE) it needs no driver: it presses that window's "
     "button (alert: OK; confirm: accept = OK/true, dismiss = Cancel/false) after checking that "
     "it really is the session's own alert or confirm; a confirm's message is not readable "
-    "through its window, so action=text then asks the driver alert when it can. A prompt is "
+    "through its window, so action=text then asks the driver alert when it can. A dialog shown "
+    "as a TaskDialog is accepted only when the page's instrumentation recorded it (a pending "
+    "dialog-open record, see ie_console); otherwise accept is refused: ask the user. Answers "
+    "carry that record as evidence. A prompt is "
     "answered only through the driver alert, so a prompt raised inside a showModalDialog window "
     "cannot be answered (ask the user). System dialogs (file, print, security prompts) are "
     "never answered: 'system dialog: ask the user'.",
@@ -77,10 +86,17 @@ def _by_window(hwnd, action):
     # Q8: a classic alert has one button (2) for both answers; a confirm and a TaskDialog:
     # 1 = OK/true, 2 = Cancel/false.
     accept = action == "accept"
+    if shape == "taskdialog" and accept:
+        evidence = consoletools.taskdialog_accept_evidence(window)  # Refused: nothing is sent
+    else:
+        evidence = consoletools.dialog_evidence(message)
     control = scriptdialogs.IDOK if (shape != "alert" and accept) else scriptdialogs.IDCANCEL
     scriptdialogs.post_command(hwnd, control)
-    return json_result({"ok": True, "did": "accepted" if accept else "dismissed", "kind": shape,
-                  "text": message, "closed": scriptdialogs.wait_gone(hwnd)})
+    answer = {"ok": True, "did": "accepted" if accept else "dismissed", "kind": shape,
+              "text": message, "closed": scriptdialogs.wait_gone(hwnd)}
+    if evidence is not None:
+        answer["evidence"] = evidence
+    return json_result(answer)
 
 
 _TASKDIALOG_NOTE = ("the message of a dialog shown as a TaskDialog is not readable through its "
@@ -156,10 +172,18 @@ def _without_target(action, text):
     return json_result({"ok": False, "note": "no dialog present"})
 
 
+def _with_evidence(answer, text):
+    evidence = consoletools.dialog_evidence(text)
+    if evidence is not None:
+        answer["evidence"] = evidence
+    return answer
+
+
 def _driver_alert(al, action, text):
     try:
         if action == "text":
-            return json_result({"ok": True, "text": al.text})
+            txt = al.text
+            return json_result(_with_evidence({"ok": True, "text": txt}, txt))
         if action == "sendkeys":
             al.send_keys(text)
             al.accept()
@@ -167,9 +191,9 @@ def _driver_alert(al, action, text):
         if action == "dismiss":
             txt = al.text
             al.dismiss()
-            return json_result({"ok": True, "did": "dismissed", "text": txt})
+            return json_result(_with_evidence({"ok": True, "did": "dismissed", "text": txt}, txt))
         txt = al.text
         al.accept()
-        return json_result({"ok": True, "did": "accepted", "text": txt})
+        return json_result(_with_evidence({"ok": True, "did": "accepted", "text": txt}, txt))
     except Exception as exc:
         return json_result({"ok": False, "note": str(exc).splitlines()[0] if str(exc) else repr(exc)})

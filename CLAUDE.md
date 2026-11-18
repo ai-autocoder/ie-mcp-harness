@@ -120,7 +120,8 @@ scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
 `win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
 exist (Task 9); `capture/store.py` and `capture/redact.py` exist, and `session.log()` goes
 through `session.REDACTOR` (Task 10); `capture/proxy.py` exists, not yet wired into the session
-(Task 11; Task 13 wires it). Keep
+(Task 11; Task 13 wires it); `capture/console.py`, `tools/console.py` and `js/instrument.js`,
+`hook.js`, `drain.js` exist (Task 12). Keep
 this section in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
@@ -239,18 +240,39 @@ the upstream code behaves as before:
   and have exactly the control set (DIRECT children, `windows.enum_children`) of a classic alert
   (Button 2, Static 20, Static 65535), a classic confirm (Button 1, Button 2, Static 20,
   Static 65535) or a TaskDialog (DirectUIHWND 0); a prompt's sets (with and without the Button
-  57089 check box) pass only for closing. Remaining risk: an `onbeforeunload` TaskDialog may be
-  helper-owned with the same shape; Task 12 must require a `dialog-open` record before a
-  TaskDialog is accepted. Messages are posted (never sent)
-  through `win32/messages.py`. `ie_dialog` is `needs_driver=lambda a: a.get("target") is None`;
+  57089 check box) pass only for closing. An `onbeforeunload` TaskDialog may be helper-owned
+  with the same shape, so (Task 12) **accepting a TaskDialog** (`WM_COMMAND` 1; window path, `hwnd:`
+  target or the no-target owned-window path) needs (1) a COM drain of the owner document that
+  reports an alert/confirm/prompt in flight in the page's own wrapper (`__iemcp.open` > 0; a failed
+  drain or no reachable document refuses) and (2) a pending `dialog-open` record
+  (`ConsoleStore.take_pending_dialog`: at most 30 s old, its page-assigned `dialog_id` (level
+  `confirm#<id>`) not closed by a `dialog` record from ANY `where`, and not already used: one
+  record, one accept); with `IE_INSTRUMENT=0`, or when either is missing, it is refused with
+  nothing sent. `where` is the drain route, never a key for pairing. Dismiss and the
+  classic alert/confirm paths are unchanged; answers carry the matching record as `evidence`.
+  Messages are posted (never sent) through `win32/messages.py`. `ie_dialog` is `needs_driver=lambda a: a.get("target") is None`;
   a target other than `hwnd:<n>` is refused before the lock. Without a target it tries the
   driver alert, but skips it while a modal HTML dialog is open (a driver call can block) and
   answers an owned alert/confirm window instead; a prompt is answered only by the driver alert
   (`dialogs.PROMPT_DRIVER_REACH` records D14), so a prompt inside a modal dialog gets "prompt not
   reachable: ask the user". Without a session `ie_dialog` no longer starts a browser.
-- **Post-call instrumentation** is one `execute_script` from the top document that walks the
-  same-origin frames in JS. It holds the driver lock until it returns, and it is skipped while
-  a dialog is open or after an async click.
+- **Post-call instrumentation** is one `execute_script` (`js/hook.js`, `tools/console.py`
+  `instrument_hook`) from the top document that walks the same-origin frames in JS. It holds the
+  driver lock until it returns, and it is skipped while a dialog is open or after an async click.
+- **Page instrumentation (plan Task 12, done).** `js/instrument.js` (ES3, idempotent through
+  `window.__iemcp`) wraps `onerror` (chained, re-chained by the hook when the page replaces it),
+  `alert`/`confirm`/`prompt` (`dialog-open` pushed before the call), `showModalDialog`, `open`,
+  existing `console` methods (all of them with `IE_CONSOLE_STUB=1`) and, on https pages or when
+  the proxy is off or blind, native `XMLHttpRequest`. Originals of console methods and of XHR
+  `open`/`send` stay under `__iemcp_<name>` on their owner, because a detached call can fail in
+  old IE. `hook.js`/`drain.js` inject with `execScript` where it exists, else a script element
+  that is removed at once, then drain; `dialog_drain` (`AFTER_CALL`, no lock) does the same over
+  COM for `html_dialog`s, the page windows behind a script dialog, an explicit `hwnd:`/`tab:`
+  target (POST_HOOKS stay driver-only) and a `tab:` `DEFAULT_TARGET`. `tools/console.py`
+  `ingest` stores records in `STORE` (redacted); `xhr` records also go to `NETWORK_STORE` as
+  `source="page"` entries (None until Task 13). `IE_INSTRUMENT=0`: both hooks return at once.
+  Records of a dialog that closes between two calls are lost; load-time errors of the first page
+  are not captured (D11).
 - **Network capture** comes from a streaming local recording proxy that only the IE-mode
   browser process uses. It is verified on the first http(s) navigation and reported as
   unverified or off otherwise. **`capture/proxy.py` (plan Task 11, done; wired by Task 13):**

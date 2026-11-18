@@ -35,6 +35,12 @@ Configuration (all via env vars, all optional):
   IE_CAPTURE_MAX_BODY  bytes kept of each captured request/response body (default 262144)
   IE_CAPTURE_JSONL  1/true/yes also appends every captured exchange, after redaction, to a
                     JSONL file (default off)
+  IE_INSTRUMENT     1 (default) lets the server wrap onerror, alert/confirm/prompt, showModalDialog,
+                    window.open (and console, native XMLHttpRequest where documented) in the pages
+                    it drives, to record errors, dialogs and console output; 0/false/no/off
+                    turns every page modification of that kind off
+  IE_CONSOLE_STUB   1/true/yes creates a complete no-op `console` where a page has none, so
+                    the page's console calls are recorded (default off: nothing is created)
   IE_SESSION_ID     logical agent/session name (default pid-<mcp process PID>)
   IE_SESSION_ROOT   root for per-session logs, locks, and ownership records
   IE_LOG_FILE       log file (default <session directory>/ie-mcp.log)
@@ -203,6 +209,8 @@ class Settings:
     capture_redact_headers: frozenset[str] = frozenset()  # extra header names, lower case
     capture_max_body: int = DEFAULT_CAPTURE_MAX_BODY
     capture_jsonl: bool = False
+    instrument: bool = True  # IE_INSTRUMENT: page wrappers, hooks and TaskDialog accept evidence
+    console_stub: bool = False  # IE_CONSOLE_STUB: create a no-op console where the page has none
 
 
 def _flag(env, name):
@@ -276,6 +284,8 @@ def load_settings(env: Mapping[str, str], pid: int | None = None,
         capture_redact_headers=_name_set(env, "IE_CAPTURE_REDACT_HEADERS"),
         capture_max_body=resolve_capture_max_body(env),
         capture_jsonl=_flag(env, "IE_CAPTURE_JSONL"),
+        instrument=_flag_default_on(env, "IE_INSTRUMENT"),
+        console_stub=_flag(env, "IE_CONSOLE_STUB"),
     )
 
 

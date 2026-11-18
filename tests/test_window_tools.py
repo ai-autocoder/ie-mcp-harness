@@ -10,13 +10,16 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 from ie_mcp import config, protocol, session
 import ie_mcp.tools  # noqa: F401  (importing the package registers every tool)
 from ie_mcp.backends import ComBackend
+from ie_mcp.capture.console import ConsoleRecord
 from ie_mcp.session import SESSION
+from ie_mcp.tools import console as consoletools
 from ie_mcp.tools import dialogs
 from ie_mcp.tools import windows as wintools
 from ie_mcp.win32 import messages, windows
@@ -457,6 +460,12 @@ class DialogToolTests(WindowToolsTestCase):
         # confirm look the same, OK is control 1, Cancel 2, and the message is not readable.
         self.dialog(info(81, "script_dialog", "#32770", "Message from webpage"),
                     TASKDIALOG_CHILDREN)
+        # Task 12: accepting a TaskDialog needs the page's pending dialog-open record (see
+        # tests/test_console.py for the refusals); dismiss needs nothing.
+        consoletools.STORE.add_many([ConsoleRecord(0, "dialog-open", "confirm", time.time(),
+                                                   "Sure?", "hwnd:1", "t.1")])
+        self.addCleanup(consoletools.STORE.clear)
+        self.patch(consoletools, "drain_dialog_owner", lambda owner_hwnd: 1)
         call("ie_dialog", {"target": "hwnd:81", "action": "accept"})
         call("ie_dialog", {"target": "hwnd:81", "action": "dismiss"})
         self.assertEqual(self.posted, [(81, WM_COMMAND, 1, 0), (81, WM_COMMAND, 2, 0)])

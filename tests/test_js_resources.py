@@ -37,7 +37,8 @@ class JsResourceTests(unittest.TestCase):
         self.assertIn("getElementsByTagName('table')", js.load("grid.js"))
 
     def test_expected_scripts_exist(self):
-        for name in ("select.js", "grid.js", "ready_probe.js", "frames.js"):
+        for name in ("select.js", "grid.js", "ready_probe.js", "frames.js", "instrument.js", "hook.js",
+                     "drain.js"):
             self.assertTrue(js.load(name).strip(), name)
 
 

@@ -192,6 +192,8 @@ All configuration is via environment variables — **all optional**:
 | `IE_CAPTURE_REDACT_HEADERS` | *(unset)* | Extra header names to redact, comma-separated, added to the built-in list. |
 | `IE_CAPTURE_MAX_BODY` | `262144` | Bytes kept of each captured request or response body; longer bodies are redacted in full, then cut and marked truncated. |
 | `IE_CAPTURE_JSONL` | `0` | `1`/`true`/`yes` also appends every captured exchange, after redaction, to a JSONL file. A value learned as secret only after a line was written is not masked in that earlier line (the in-memory store re-masks on read). |
+| `IE_INSTRUMENT` | `1` | Page instrumentation: the server puts a small ES3 script into the pages it drives (after each driver tool call, and into dialogs and attached tabs it reads over COM) that wraps `window.onerror`, `alert`/`confirm`/`prompt`, `showModalDialog`, `window.open` (and the page's own `console`, and native `XMLHttpRequest` on https pages) to record errors, dialogs, calls and console output for `ie_console`. Every wrapper calls the original with the caller's exact arguments and returns its value. `0`/`false`/`no`/`off` turns it all off (nothing is injected, nothing recorded, TaskDialogs are no longer accepted by `ie_dialog`). The full list is in the design spec's Fidelity table. |
+| `IE_CONSOLE_STUB` | `0` | `1`/`true`/`yes` creates a complete no-op `console` where a page has none (IE7 and quirks documents), so its `console.*` calls are recorded. Off by default: nothing is created that the page does not have. |
 | `IE_LOG_FILE` | `<session-dir>\ie-mcp.log` | Optional override for this session's log file. |
 | `IE_SESSION_ID` | `pid-<MCP process PID>` | Stable agent/session name. Different IDs can run concurrently; the same ID is exclusive. |
 | `IE_SESSION_ROOT` | `%TEMP%\ie-mcp\sessions` | Root for session directories containing logs, leases, and ownership records. |
@@ -207,7 +209,7 @@ All configuration is via environment variables — **all optional**:
 |------|-------------|
 | `ie_open` | Start (or reuse) an Edge IE-mode session and navigate to a URL. |
 | `ie_goto` | Navigate the current session to a new URL. |
-| `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs). Never waits: while another call holds the browser it reports `"driver": "busy"` and leaves out title/url. |
+| `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs, and the page modifications: `instrumented`, `console_stub`, `xhr_wrapped`). Never waits: while another call holds the browser it reports `"driver": "busy"` and leaves out title/url. |
 | `ie_browsers` | List all Edge IE-mode windows + IEDriver processes, flagging the one this session owns. |
 | `ie_kill_orphans` | Terminate processes recorded for crashed sessions only (Edge profile and recorded image name + creation time must still match); never kills live-agent or unknown browsers. |
 | `ie_frames` | List the frames/iframes of the current page (index, name, id, src). |
@@ -220,6 +222,8 @@ All configuration is via environment variables — **all optional**:
 | `ie_windows` | List the session's windows as JSON (`hwnd`, `target`, `kind`: main / popup / html_dialog / script_dialog / system_dialog, title, url, owner, `is_prompt`). When no modal is open and the browser is free it adds each page window's `driver_handle` and `current`. Works while a dialog is open and never waits for a busy browser. |
 | `ie_switch_window` | Make a driver window (pop-up, `showModalDialog` window) the one the other tools act on: `handle`, `title_contains` or `main=true`. Returns the new title and URL. |
 | `ie_close_window` | Close a pop-up or modal dialog by `hwnd:<n>` (`window.close()` over COM, else `WM_CLOSE`) or by driver handle. Refuses the main window (`ie_close`), an attached tab (`ie_detach`) and system dialogs. |
+| `ie_console` | Records the page instrumentation made, as JSON `{records, next_since_id}`: `error` (script errors), `dialog-open` / `dialog` (an `alert`/`confirm`/`prompt` when it opens and when it closed, with the result), `modal` (`showModalDialog` URL, features, `dialogArguments` and return value), `open` (`window.open`), `console` and `xhr` (native XHR on https pages). Each has `id`, `kind`, `level`, `time`, `text` and `where` (the window target and frame path). Arguments `since_id`, `kinds`, `limit`. Text is redacted. |
+| `ie_console_clear` | Forget every record `ie_console` holds. |
 | `ie_js` | Execute JavaScript in the page or a frame and return the result. |
 | `ie_screenshot` | PNG screenshot of the window, or of a single element. `save_path` must be a bare file name; it is saved in `<session dir>\screenshots\` and kept after `ie_close`. |
 | `ie_wait_text` | Poll until a substring appears (or disappears) in the page text. |
@@ -282,6 +286,33 @@ them. A **script dialog** (`alert`, `confirm`, `prompt`) is answered with `ie_di
   A prompt raised inside a `showModalDialog` window therefore cannot be answered: `ie_dialog`
   says `prompt not reachable: ask the user`. `ie_close_window` can still cancel it
   (the prompt then returns `null`).
+
+### Console, errors and dialog records
+
+`ie_console` shows what the page instrumentation (`IE_INSTRUMENT`, on by default) recorded.
+Records are collected after each tool call, from the document the driver is on and its
+same-origin frames (one `execute_script`), and over COM from modal HTML dialogs, from the
+page windows behind an open script dialog, from a call's explicit `hwnd:`/`tab:` target and from an
+attached tab. Know its limits:
+
+- **Load-time errors of the first page are not captured** (spike D11): the session's initial URL
+  bypasses the proxy, so nothing is injected before its scripts run. Anything that happens after
+  the first tool call, on that page or any later one, is.
+- **Records of a dialog that closes between two calls are lost**: nothing reads a page while no
+  call is running, and a closed dialog's document is gone.
+- `console` is wrapped only where the page already has one (documentMode 11 does, IE7 does not);
+  `IE_CONSOLE_STUB=1` creates a no-op console where there is none. Native `XMLHttpRequest` is
+  wrapped on https pages (a proxy cannot read inside them) where the document has an `XMLHttpRequest.prototype` (not documentMode 7); ActiveX
+  `XMLHTTP` never is.
+- A pop-up's records go to its opener's queue when it is same-origin (marked `"popup": true`).
+- A TaskDialog (IE's form for a later dialog of a page; its message cannot be read from the
+  window) is accepted by `ie_dialog` only when all of these hold: the owner document, read over
+  COM at that moment, reports an `alert`/`confirm`/`prompt` of the page's own wrapper in
+  progress; and a `dialog-open` record exists (at most 30 s old) whose page-assigned id no
+  `dialog` record has closed. The record is used up: one record, one accept. Otherwise, or if
+  the page cannot be read, or with `IE_INSTRUMENT=0`, accept is refused (`ask the user`): IE's
+  "leave this page?" prompt has the same shape and nothing in the page's wrappers behind it.
+  Dismiss is not restricted. Answers carry the matching record as `evidence`.
 
 ### Working with frames
 
@@ -372,9 +403,11 @@ Running straight from the clone without installing also works — `python -m ie_
   (needs the optional `pywin32` extra; the server runs without it).
 - `ie_mcp/protocol.py` — the stdio JSON-RPC loop and the `@tool` registry.
 - `ie_mcp/tools/` — one `t_*` function per tool, grouped in `navigation.py`, `read.py`,
-  `interact.py`, `windows.py`, `dialogs.py` and `diagnostics.py`.
+  `interact.py`, `windows.py`, `dialogs.py`, `console.py` (the instrumentation hooks and
+  `ie_console`) and `diagnostics.py`.
+- `ie_mcp/capture/console.py` — console, error and dialog records and their redacting store.
 - `ie_mcp/js/` — the ES3 scripts injected into the page (`select.js`, `grid.js`,
-  `ready_probe.js`).
+  `ready_probe.js`, `instrument.js`, `hook.js`, `drain.js`).
 - `ie_mcp/cli.py` — the `--install`/`--selftest` CLI and the server start-up.
 - `pyproject.toml` — packaging + the `ie-mcp` console-script entry point (`ie_mcp.cli:main`).
 - `requirements.txt` — runtime deps (just selenium; mirrors `pyproject.toml`).
