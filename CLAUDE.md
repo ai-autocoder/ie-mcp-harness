@@ -119,7 +119,8 @@ modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
 scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
 `win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
 exist (Task 9); `capture/store.py` and `capture/redact.py` exist, and `session.log()` goes
-through `session.REDACTOR` (Task 10). Keep
+through `session.REDACTOR` (Task 10); `capture/proxy.py` exists, not yet wired into the session
+(Task 11; Task 13 wires it). Keep
 this section in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
@@ -252,7 +253,21 @@ the upstream code behaves as before:
   a dialog is open or after an async click.
 - **Network capture** comes from a streaming local recording proxy that only the IE-mode
   browser process uses. It is verified on the first http(s) navigation and reported as
-  unverified or off otherwise.
+  unverified or off otherwise. **`capture/proxy.py` (plan Task 11, done; wired by Task 13):**
+  `RecordingProxy(store, host, port, instrument_js, upstream_proxy, no_cache)` forwards only
+  absolute-form http requests to their own target (or to `upstream_proxy`), keeps one upstream
+  `HTTPConnection` per client connection and host:port (one per client connection when chained),
+  tunnels CONNECT (entry `tunnel=True`, recorded at tunnel-up), answers `/__iemcp__/` itself
+  (`instrument_js`, else 404; never forwarded or recorded), refuses origin-form/non-http requests
+  with 400 (not recorded) and requests to itself with 508 (recorded). It streams every response,
+  copies at most `store.max_body` bytes of each body into the entry, and adds the entry after the
+  last byte reaches the client. Injection runs only when `instrument_js` is set and
+  `is_document_request` holds (D10: `Accept` contains `text/html`; such requests are sent with
+  `Accept-Encoding: identity`); `find_insertion_point` decides on at most 64 KB. Bodies are stored
+  as received (a gzip response stays compressed). `seen` (1000), `first_request` and
+  `doc_charsets` (1000) are what Task 13 needs for D11 verification and `referer_charset`.
+  `stop()` wakes handler threads blocked in `recv`/`select` by closing their sockets: on Windows
+  `shutdown()` alone does not wake them.
 - **Settings and tool guards (plan Task 4, done).** Interaction mode defaults to `background`
   (native input, no window focus). `IE_CLEAN_SESSION` is opt-in. `IE_PYDEPS` is the only way a
   path is added to `sys.path` (there is no implicit `../.pydeps`). `IE_DRIVER_PATH` unset means

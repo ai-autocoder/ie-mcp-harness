@@ -73,8 +73,8 @@ changing how the page behaves**.
 
 | Change | When | Switch |
 |---|---|---|
-| Loader `<script>` (absolute `…/__iemcp__/i.js` on the document's host; it removes itself when it runs) in HTML documents, including XHR responses that are full documents fetched with `Accept: text/html` | Proxy on, `IE_INSTRUMENT=1` and spike D10 = yes | `IE_INSTRUMENT=0` |
-| `Accept-Encoding: identity` on requests for documents the proxy may modify | Proxy on, `IE_INSTRUMENT=1` and spike D10 = yes | `IE_INSTRUMENT=0` |
+| Loader `<script>` (absolute `…/__iemcp__/i.js` on the document's host; it removes itself when it runs) in HTML documents, including XHR responses that are full documents fetched with `Accept: text/html`. Only `text/html` 200 responses, not encoded, not attachments, whose first tag is a doctype, `<html`, `<head` or `<body`; never fragments, plain text, UTF-16 bodies, HEAD/204/304, head-less framesets or `<?xml` documents. `Content-Length` is fixed or the body re-chunked | Proxy on, `IE_INSTRUMENT=1` and spike D10 = yes | `IE_INSTRUMENT=0` |
+| `Accept-Encoding: identity` on every request whose `Accept` contains `text/html` (documents, and XHRs that ask for HTML), whether or not the response is then modified | Proxy on, `IE_INSTRUMENT=1` and spike D10 = yes | `IE_INSTRUMENT=0` |
 | `Cache-Control: no-store`, validators dropped (Back re-fetches the page; Back to a POST result shows "Webpage has expired") | Only on responses the proxy modified | `IE_INSTRUMENT=0` |
 | Conditional request headers stripped (pages re-fetched instead of served from cache) | `IE_CAPTURE_NO_CACHE=1` (off by default) | `IE_CAPTURE_NO_CACHE=0` |
 | Wrappers around `onerror`, `alert`/`confirm`/`prompt`, `showModalDialog`, `open` (and `console`, native `XMLHttpRequest` as above) | Instrumentation active | `IE_INSTRUMENT=0` |
