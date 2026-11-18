@@ -240,7 +240,32 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 - IEDriver's default `unhandledPromptBehavior` is "dismiss and notify": any driver command
   silently cancels an open alert/confirm. Plan Task 4 sets `ignore`.
 - A WebDriver click whose handler opens `alert`/`confirm`/`showModalDialog` can block until the
-  dialog closes.
+  dialog closes. (On the development machine, Edge 146 + IEDriver 4.14, the spike saw it return
+  at once with the dialog open; keep the watchdog anyway.)
+- Synthetic input (`native_events=False`) did nothing on the development machine: `click`
+  raises `ElementNotInteractableException` or silently no-ops and `send_keys` leaves the field
+  empty. Native events with `require_window_focus=False` worked there while another window had
+  focus (spike D17, one machine; about 1 click in 6 was lost, so check a click's effect).
+- An inherited `__COMPAT_LAYER` environment variable (the Claude desktop app sets one) makes
+  Edge relaunch itself, so IEDriver cannot find the IE window. Start IEDriver with that variable
+  removed from its environment (spike D16). Do not use `ie.ignoreprocessmatch`.
+- With `--ie-mode-force`, `about:blank` renders in Chromium and IEDriver finds no IE window:
+  always start a session on an http(s) URL.
+- Session creation sometimes hangs inside IEDriver after Edge starts; bound it and retry.
+- The per-process proxy does not see the session's **initial URL** (`initial_browser_url`);
+  everything after it is proxied (spike D11).
+- Over COM, a documentMode 11 document hides window expandos and DOM methods from win32com's
+  dynamic dispatch (`getattr` fails; mode 7 works; modes 8–10 untested). Run everything as
+  script through `execScript` and read results
+  with `IDispatchEx.GetDispID(name, fdexNameCaseSensitive)` + `InvokeEx` (spike D7).
+- Script dialogs are `#32770` windows owned by an `Alternate Modal Top Most` helper window (no
+  owner of its own, same process), not by the browser window; inside a `showModalDialog`
+  window they are owned by its `Internet Explorer_TridentDlgFrame`. A `confirm` is a TaskDialog
+  (`DirectUIHWND` child only): its text is not readable through child windows, but
+  `WM_COMMAND` 1/2 answers it. The alert's OK button has control ID 2. A `prompt` has an `Edit`
+  child (spike Q8/D14).
+- The fixture's page without a doctype (`quirks.htm`) runs in documentMode 11 with
+  `compatMode == "BackCompat"`, not in mode 5 (spike Q6).
 - Pass the `proxy` capability's `noProxy` as a **list** (`["<-loopback>"]`). IEDriver rejects a
   string; selenium's `Proxy` class converts strings, but raw capability dicts do not. Without
   `use_per_process_proxy=True`, IEDriver writes the user's global WinINet proxy settings; never
