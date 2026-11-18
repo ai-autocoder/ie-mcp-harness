@@ -5,8 +5,13 @@ import time
 from pathlib import PureWindowsPath
 
 from ie_mcp import config, js
-from ie_mcp.protocol import image_result, text_result, tool
+from ie_mcp.protocol import image_result, locator_budget, text_result, tool, wait_budget
 from ie_mcp.session import SESSION, log
+
+# Defaults of the wait tools; each watchdog budget is computed from the same values.
+WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL = 45, 2
+WAIT_READY_TIMEOUT, WAIT_READY_INTERVAL = 60, 2
+WAIT_ELEMENT_TIMEOUT, WAIT_ELEMENT_INTERVAL = 20, 1
 
 
 def _parse_ready(raw):
@@ -78,10 +83,12 @@ def t_html(args):
             "value": {"type": "string"},
             "attr": {"type": "string", "description": "text (default) | value | any attribute name"},
             "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
             "limit": {"type": "integer"},
         },
         "required": ["by", "value"],
     },
+    budget=locator_budget(),
 )
 def t_get(args):
     """Read an element's text, value, or a named attribute via direct JS.
@@ -218,8 +225,10 @@ def _screenshot_target(name):
             "by": {"type": "string", "description": "element locator type (for element screenshot)"},
             "value": {"type": "string", "description": "element locator value (for element screenshot)"},
             "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
     },
+    budget=locator_budget(),
 )
 def t_screenshot(args):
     # Validate before touching the browser: a bad name must fail without side effects.
@@ -266,6 +275,7 @@ def t_screenshot(args):
         },
         "required": ["contains"],
     },
+    budget=wait_budget(WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL),
 )
 def t_wait_text(args):
     """Poll until `contains` appears (or, with gone=True, disappears) in a frame.
@@ -280,8 +290,8 @@ def t_wait_text(args):
     ci = args.get("case_insensitive", True)
     if ci:
         needle = needle.lower()
-    timeout = args.get("timeout", 45)
-    interval = args.get("interval", 2)
+    timeout = args.get("timeout", WAIT_TEXT_TIMEOUT)
+    interval = args.get("interval", WAIT_TEXT_INTERVAL)
     frame = args.get("frame")
     gone = args.get("gone", False)
 
@@ -362,6 +372,7 @@ def t_wait_text(args):
             "settle": {"type": "boolean", "description": "require DOM to stop changing (default true); set false to only require readyState complete"},
         },
     },
+    budget=wait_budget(WAIT_READY_TIMEOUT, WAIT_READY_INTERVAL),
 )
 def t_wait_ready(args):
     """Wait until the page (and all same-origin frames) finish loading — app-agnostic.
@@ -372,8 +383,8 @@ def t_wait_ready(args):
     (e.g. ~30s grids) without knowing anything about the specific application.
     """
     d = SESSION.ensure()
-    timeout = args.get("timeout", 60)
-    interval = args.get("interval", 2)
+    timeout = args.get("timeout", WAIT_READY_TIMEOUT)
+    interval = args.get("interval", WAIT_READY_INTERVAL)
     stable_rounds = args.get("stable_rounds", 2)
     min_chars = args.get("min_chars", 1)
     require_settle = args.get("settle", True)
@@ -437,14 +448,15 @@ def t_wait_ready(args):
         },
         "required": ["by", "value"],
     },
+    budget=wait_budget(WAIT_ELEMENT_TIMEOUT, WAIT_ELEMENT_INTERVAL),
 )
 def t_wait_element(args):
     """Wait for an element (by/value) to appear — or, with gone=True, to disappear."""
     by = args["by"]
     value = args["value"]
     frame = args.get("frame")
-    timeout = args.get("timeout", 20)
-    interval = args.get("interval", 1)
+    timeout = args.get("timeout", WAIT_ELEMENT_TIMEOUT)
+    interval = args.get("interval", WAIT_ELEMENT_INTERVAL)
     gone = args.get("gone", False)
     d = SESSION.ensure()
     elapsed = 0

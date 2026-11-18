@@ -32,6 +32,12 @@ def log(*a):
             pass
 
 
+# Serialises every tool that talks to the IEDriver (it is not thread-safe, and frame state is
+# per session). A plain Lock, not an RLock: a tool call's POST_HOOKS sub-thread releases it,
+# not the thread that acquired it. protocol.run_tool owns the acquire/release protocol.
+DRIVER_LOCK = threading.Lock()
+
+
 class Cancelled(Exception):
     """A running wait or find was stopped by ``ie_close(force=true)`` or by ``close()``."""
 

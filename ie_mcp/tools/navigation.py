@@ -2,8 +2,12 @@
 import time
 
 from ie_mcp import config
-from ie_mcp.protocol import text_result, tool
+from ie_mcp.protocol import attach_budget, text_result, tool
 from ie_mcp.session import SESSION, log
+
+# Post-load pauses; the watchdog budget below is computed from the same defaults.
+OPEN_WAIT = 4
+GOTO_WAIT = 3
 
 
 @tool(
@@ -19,6 +23,7 @@ from ie_mcp.session import SESSION, log
             "wait": {"type": "number", "description": "seconds to wait after load (default 4)"},
         },
     },
+    budget=attach_budget(OPEN_WAIT),
 )
 def t_open(args):
     url = args.get("url") or config.SETTINGS.default_url
@@ -31,7 +36,7 @@ def t_open(args):
             d.get(url)
         except Exception as exc:
             log("get() note:", exc)
-    time.sleep(args.get("wait", 4))
+    time.sleep(args.get("wait", OPEN_WAIT))
     return text_result(f"opened {url}\ntitle: {d.title}\nurl: {d.current_url}")
 
 
@@ -43,6 +48,7 @@ def t_open(args):
         "properties": {"url": {"type": "string"}, "wait": {"type": "number"}},
         "required": ["url"],
     },
+    budget=attach_budget(GOTO_WAIT),
 )
 def t_goto(args):
     url = args["url"]
@@ -51,7 +57,7 @@ def t_goto(args):
         d.get(url)
     except Exception as exc:
         log("get() note:", exc)
-    time.sleep(args.get("wait", 3))
+    time.sleep(args.get("wait", GOTO_WAIT))
     return text_result(f"title: {d.title}\nurl: {d.current_url}")
 
 

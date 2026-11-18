@@ -81,7 +81,7 @@ changing how the page behaves**.
 | Proxy in the request path. It may move intranet hosts that normally bypass a proxy into another IE security zone, which can change Protected Mode, automatic logon and Compatibility View (and with it the document mode) | `IE_CAPTURE=1` | `IE_CAPTURE=0`, or list those hosts in `IE_CAPTURE_BYPASS` |
 | IEDriver native input without window focus (`native_events=True`, `require_window_focus=False`: window messages, no focus, no physical mouse; synthetic events did nothing on the development machine, spike D17) | `IE_INTERACTION_MODE=background` (the default) | `IE_INTERACTION_MODE=native` (takes focus; can mix with the user's keystrokes and mouse) |
 | A complete no-op `console` created where the page has none | `IE_CONSOLE_STUB=1` (off by default) | `IE_CONSOLE_STUB=0` |
-| Async (script) clicks: not user-initiated, no mousedown/mouseup/focus, may be blocked by the pop-up blocker | `mode="async"` or `IE_CLICK_MODE=async` | `mode="driver"` |
+| Async (script) clicks: `e.click()` queued with `setTimeout`; not user-initiated, no mousedown/mouseup/focus, may be blocked by the pop-up blocker | `ie_click mode="async"` or `IE_CLICK_MODE=async` (default is `driver`, spike D1) | `mode="driver"` / `IE_CLICK_MODE=driver` (the default) |
 | COM input on dialogs and attached tabs: synthetic event sequence or posted key messages | `target="hwnd:…"`/`"tab:…"` | use the driver path when it works |
 | Instrumentation left in an attached tab after `ie_detach` | `ie_attach` used | reload the tab |
 

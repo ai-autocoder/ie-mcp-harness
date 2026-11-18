@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from ie_mcp import config, js
-from ie_mcp.protocol import text_result, tool
+from ie_mcp.protocol import locator_budget, text_result, tool
 from ie_mcp.session import SESSION
 
 
@@ -28,39 +28,78 @@ def _key(name):
     return _KEY_MAP.get(name.lower(), name)
 
 
+# Post-action pauses; each tool's watchdog budget is computed from the same defaults.
+CLICK_WAIT = 2
+SELECT_WAIT = 2
+PRESS_KEY_WAIT = 1
+HOVER_WAIT = 1
+
+# Queue the click on the page's own timer without waiting for its handlers. A WebDriver click whose handler
+# opens alert/confirm/showModalDialog can block until that dialog closes; a timer callback
+# cannot block this call. The price: the click is script-initiated (see the tool description).
+ASYNC_CLICK_SCRIPT = ("var e=arguments[0];window.setTimeout(function(){e.click();},0);"
+                      "return 'queued';")
+
+
+def _click_mode(args):
+    return args.get("mode") or config.SETTINGS.click_mode
+
+
+def _click_is_deferred(args):
+    """An async plain click only queues e.click(); double/right always use the driver."""
+    return args.get("action", "click") == "click" and _click_mode(args) == "async"
+
+
 @tool(
     "ie_click",
     "Click an element (auto-waits). 'by' is id/css/xpath/name/link_text/tag/class. "
-    "action: click (default) | double | right.",
+    "action: click (default) | double | right. "
+    "mode: driver (a WebDriver click; the default unless IE_CLICK_MODE=async) | async. "
+    "An async click is queued on the page's own timer, so the call does not wait for the "
+    "click's handlers (only the usual 'wait' pause follows) and cannot block even if the "
+    "click opens a dialog that would block a driver click. It is script-initiated: there is "
+    "no mousedown/mouseup/focus, handlers that test for a user gesture can behave differently, "
+    "and the pop-up blocker may block a window.open it triggers. double and right always use "
+    "the driver.",
     {
         "type": "object",
         "properties": {
             "by": {"type": "string"},
             "value": {"type": "string"},
             "action": {"type": "string", "description": "click | double | right"},
+            "mode": {"type": "string", "description": "driver | async (default: IE_CLICK_MODE, normally driver)"},
             "frame": {"type": ["string", "integer"]},
-            "timeout": {"type": "number"},
-            "wait": {"type": "number"},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "wait": {"type": "number", "description": "seconds to pause after the click (default 2)"},
         },
         "required": ["by", "value"],
     },
+    budget=locator_budget(CLICK_WAIT),
+    defers_effect=_click_is_deferred,
 )
 def t_click(args):
-    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
     action = args.get("action", "click")
-    if action == "click":
+    mode = _click_mode(args)
+    # Validate before touching the browser: a bad argument must fail without side effects.
+    if action not in ("click", "double", "right"):
+        raise ValueError("action must be click|double|right")
+    if mode not in config.CLICK_MODES:
+        raise ValueError("mode must be driver|async")
+    el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    if action == "click" and mode == "async":
+        SESSION.ensure().execute_script(ASYNC_CLICK_SCRIPT, el)
+    elif action == "click":
         el.click()
     else:
         from selenium.webdriver.common.action_chains import ActionChains
         ac = ActionChains(SESSION.driver)
         if action == "double":
             ac.double_click(el).perform()
-        elif action == "right":
-            ac.context_click(el).perform()
         else:
-            raise ValueError("action must be click|double|right")
-    time.sleep(args.get("wait", 2))
-    return text_result(f"{action}-clicked {args['by']}={args['value']}")
+            ac.context_click(el).perform()
+    time.sleep(args.get("wait", CLICK_WAIT))
+    queued = " (async: queued, runs after this call returns)" if action == "click" and mode == "async" else ""
+    return text_result(f"{action}-clicked {args['by']}={args['value']}{queued}")
 
 
 @tool(
@@ -74,9 +113,11 @@ def t_click(args):
             "text": {"type": "string"},
             "frame": {"type": ["string", "integer"]},
             "clear": {"type": "boolean"},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
         "required": ["by", "value", "text"],
     },
+    budget=locator_budget(),
 )
 def t_fill(args):
     el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
@@ -99,9 +140,12 @@ def t_fill(args):
             "option_value": {"type": "string", "description": "option value attribute"},
             "index": {"type": "integer", "description": "option index (0-based)"},
             "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "wait": {"type": "number", "description": "seconds to pause after selecting (default 2)"},
         },
         "required": ["by", "value"],
     },
+    budget=locator_budget(SELECT_WAIT),
 )
 def t_select(args):
     """Select an <option> by label/value/index, set via JS + fire onchange.
@@ -122,7 +166,7 @@ def t_select(args):
     res = d.execute_script(js.load("select.js"), el, mode, val)
     if res == "NOTFOUND":
         raise ValueError(f"option {mode}={val!r} not found in {args['by']}={args['value']}")
-    time.sleep(args.get("wait", 2))
+    time.sleep(args.get("wait", SELECT_WAIT))
     return text_result(f"selected {mode}={val} -> {res[3:]}")
 
 
@@ -139,9 +183,11 @@ def t_select(args):
             "value": {"type": "string"},
             "frame": {"type": ["string", "integer"]},
             "wait": {"type": "number"},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
         "required": ["key"],
     },
+    budget=locator_budget(PRESS_KEY_WAIT),
 )
 def t_press_key(args):
     """Press a key (Enter/Tab/Escape/arrows/etc. or a literal char) on an element or the page."""
@@ -155,7 +201,7 @@ def t_press_key(args):
         SESSION._apply_frame(args.get("frame"))
         d.switch_to.active_element.send_keys(key)
         where = "active element"
-    time.sleep(args.get("wait", 1))
+    time.sleep(args.get("wait", PRESS_KEY_WAIT))
     return text_result(f"pressed {args['key']} on {where}")
 
 
@@ -169,16 +215,18 @@ def t_press_key(args):
             "value": {"type": "string"},
             "frame": {"type": ["string", "integer"]},
             "wait": {"type": "number"},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
         "required": ["by", "value"],
     },
+    budget=locator_budget(HOVER_WAIT),
 )
 def t_hover(args):
     from selenium.webdriver.common.action_chains import ActionChains
     d = SESSION.ensure()
     el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
     ActionChains(d).move_to_element(el).perform()
-    time.sleep(args.get("wait", 1))
+    time.sleep(args.get("wait", HOVER_WAIT))
     return text_result(f"hovered {args['by']}={args['value']}")
 
 
@@ -195,8 +243,10 @@ def t_hover(args):
             "dx": {"type": "integer"},
             "dy": {"type": "integer"},
             "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
     },
+    budget=locator_budget(),
 )
 def t_scroll(args):
     """Scroll: bring an element into view (by/value), or scroll the page/a container.
@@ -264,9 +314,11 @@ def _upload_target(path, upload_dir):
             "path": {"type": "string",
                      "description": "file inside IE_UPLOAD_DIR: relative to it, or absolute"},
             "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
         "required": ["by", "value", "path"],
     },
+    budget=locator_budget(),
 )
 def t_upload(args):
     """Set a file <input type=file> by sending the local file path."""

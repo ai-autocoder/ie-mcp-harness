@@ -182,6 +182,8 @@ All configuration is via environment variables — **all optional**:
 | `IE_PAGE_TIMEOUT` | `30` | Per-page load timeout (seconds). |
 | `IE_PYDEPS` | *(unset)* | Extra `sys.path` dir for vendored selenium. Nothing is added unless you set it (there is no implicit `../.pydeps`). |
 | `IE_INTERACTION_MODE` | `background` | Input strategy: `background` (default) sends native input as window messages without taking window focus or the physical mouse; `native` requires window focus and is the compatibility fallback (it takes focus and can mix with your own keystrokes and mouse). Selected when the MCP process starts. |
+| `IE_TOOL_TIMEOUT` | `45` | Seconds one tool call may take before the server answers `BLOCKED:` (see below). Tools that wait declare a longer budget of their own: `ie_open`/`ie_goto` allow `IE_ATTACH_RETRIES x 75 + wait + 15`, the wait tools `timeout + interval + 15`, tools that locate an element `timeout + wait + 15`, `ie_sleep` `seconds + 5`. |
+| `IE_CLICK_MODE` | `driver` | Default of `ie_click`'s `mode`: `driver` (a WebDriver click) or `async` (a script click queued with `setTimeout`; see `ie_click`). |
 | `IE_CLEAN_SESSION` | `0` | `1`/`true`/`yes` makes IEDriver clear the **whole** IE-mode cookie store and cache of the current user (not just this session's) when the session starts and ends. Off by default; turning it on logs you out of your own IE-mode sites. |
 | `IE_UPLOAD_DIR` | *(unset)* | Directory `ie_upload` may read from. Unset: uploads are disabled. A path must resolve inside it (relative paths are taken relative to it). |
 | `IE_LOG_FILE` | `<session-dir>\ie-mcp.log` | Optional override for this session's log file. |
@@ -199,13 +201,13 @@ All configuration is via environment variables — **all optional**:
 |------|-------------|
 | `ie_open` | Start (or reuse) an Edge IE-mode session and navigate to a URL. |
 | `ie_goto` | Navigate the current session to a new URL. |
-| `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs). |
+| `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs). Never waits: while another call holds the browser it reports `"driver": "busy"` and leaves out title/url. |
 | `ie_browsers` | List all Edge IE-mode windows + IEDriver processes, flagging the one this session owns. |
 | `ie_kill_orphans` | Terminate processes recorded for crashed sessions only (Edge profile and recorded image name + creation time must still match); never kills live-agent or unknown browsers. |
 | `ie_frames` | List the frames/iframes of the current page (index, name, id, src). |
 | `ie_text` | Get visible text of the page or a specific frame. |
 | `ie_html` | Get HTML source of the page or a frame. |
-| `ie_click` | Click an element (auto-waits); `click` / `double` / `right`. |
+| `ie_click` | Click an element (auto-waits); `click` / `double` / `right`. `mode` is `driver` (default; set by `IE_CLICK_MODE`) or `async`: the click is queued on the page's own timer, so the call does not wait for the click's handlers (only the usual `wait` pause follows) and cannot block even if the click opens a dialog that blocks a driver click. An async click is **script-initiated**: no mousedown/mouseup/focus, and the pop-up blocker may block a `window.open` it triggers. `double`/`right` always use the driver. |
 | `ie_fill` | Type text into an input/textarea (auto-waits). |
 | `ie_upload` | Set a `<input type=file>` by sending a local path; only files inside `IE_UPLOAD_DIR` (disabled when unset). |
 | `ie_dialog` | Handle a JS dialog (`accept` / `dismiss` / `text` / `sendkeys`). |
@@ -368,6 +370,23 @@ The mode is fixed for the lifetime of the MCP process, so restart the MCP after 
 mode is headless: Edge still creates a visible IE-mode window. When multiple native-mode agents run
 on the same Windows desktop, their focus-sensitive interactions can still conflict. The server also
 returns this selection guidance in its MCP `initialize` response so clients can present it to LLMs.
+
+### Busy and blocked browsers
+
+The driver handles one call at a time, and a call can hang (for example while a dialog is open), so
+no tool call can hang the server:
+
+- A call that needs the browser while another one is using it waits up to its budget, then answers
+  `BUSY: <tool> has held the browser for <n>s`; with a dialog open it answers `BLOCKED: modal dialog
+  open`.
+- A call that runs past its budget answers `BLOCKED: the browser did not answer within <n>s; the
+  action may still complete`. The call itself cannot be stopped and goes on holding the browser until
+  it returns (its late result is discarded). `ie_close force=true` works at any time: it does not
+  need the browser, cancels running waits and kills only this session's own Edge and IEDriver.
+- When a modal window is open after a call, the answer ends with a `NOTICE:` item naming it
+  (window tools arrive with later tasks).
+- `ie_sleep`, `ie_browsers`, `ie_kill_orphans`, `ie_status` and `ie_close force=true` never wait for the
+  browser.
 
 ### Other things the server does to the driver
 

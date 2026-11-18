@@ -127,8 +127,9 @@ ie_mcp/
   __main__.py        python -m ie_mcp -> cli.main()
   cli.py             --selftest / --install / --uninstall / stdio server start
   config.py          Settings (every env var, read once), discover_driver_path
-  protocol.py        JSON-RPC loop, @tool registry, run_tool watchdog, notices, post-call hooks
-  session.py         IeSession, build_options, SessionLease, process tracking/cleanup, DRIVER_LOCK
+  protocol.py        JSON-RPC loop (one thread per tools/call), @tool registry, run_tool watchdog
+                     (call_budget, BUSY/BLOCKED, CALL_CONTEXTS, MODAL_PROBE notices, POST_HOOKS, AFTER_CALL)
+  session.py         IeSession, build_options, SessionLease, process tracking/cleanup, DRIVER_LOCK (plain Lock)
   backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); resolve_backend
   png.py             encode_png (stdlib zlib)
   win32/
@@ -169,10 +170,32 @@ the upstream code behaves as before:
   call (or per hook thread), and **no COM object outlives the thread that obtained it**. The
   modal probe is Win32-only and never touches COM. Read COM expandos with `getattr(win, "__iemcp_r")`, because Python mangles `__names`
   written inside a class.
-- **No tool call may hang the server.** `handle()` and `serve()` both go through the
-  `run_tool` watchdog, with a per-call budget. The driver lock is acquired with that budget.
-  `ie_close(force=true)` cancels running wait loops and kills only this session's own Edge and
-  IEDriver, after checking their identity. Window and dialog tools work without the driver.
+- **No tool call may hang the server (plan Task 6, done).** `handle()` routes every
+  `tools/call` through `protocol.run_tool`; `serve()` only adds threading (one thread per
+  `tools/call`, responses written under a lock, possibly out of order; at EOF it waits for the
+  calls still running). `call_budget` = `max(IE_TOOL_TIMEOUT, spec.budget(args))`; tools declare
+  budgets with `locator_budget`, `wait_budget` and `attach_budget`, built from the same
+  defaults the tool uses (`number_arg` ignores bad values). A `needs_driver(args)` call takes
+  `session.DRIVER_LOCK` (a plain `Lock`: the POST_HOOKS sub-thread releases it) with
+  `acquire(timeout=budget)` and answers `BUSY: <tool> has held the browser for <n>s` (`BLOCKED:
+  modal dialog open` if `MODAL_PROBE()` finds windows). The tool then runs in a daemon worker;
+  past the budget the caller answers `BLOCKED: ... the action may still complete`, the worker
+  keeps the lock until it returns, then discards its result and runs no hooks. The lock is
+  released exactly once on every path (`_Hold`). The worker enters every `CALL_CONTEXTS`
+  context around the whole call, and the POST_HOOKS thread (3 s wait, releases the lock) and
+  each AFTER_CALL thread (2 s wait each, no lock) enter them again. Every result gets a
+  `NOTICE:` item per open window. `ie_close(force=true)`, `ie_sleep`, `ie_browsers`,
+  `ie_kill_orphans` and `ie_status` have `needs_driver=False` (`ie_status` takes the lock
+  itself for 0.5 s, through `protocol.driver_hold` so BUSY names it, and reports `"driver": "busy"` otherwise); `ie_close(force=true)` cancels
+  running wait loops and kills only this session's own Edge and IEDriver, after checking
+  their identity. Window and dialog tools work without the driver. `ie_sleep` and the `wait=`
+  pauses are not cancellable yet.
+- **Async click (plan Task 6).** `ie_click mode=async` (default `IE_CLICK_MODE`, `driver` per
+  spike D1) queues `e.click()` with `setTimeout`, so it cannot block on a dialog; it is
+  script-initiated (no mousedown/mouseup/focus, the pop-up blocker may block `window.open`,
+  spike D8). `double`/`right` always use the driver. The post-call hooks are skipped for a
+  call that queued its effect: `ToolSpec.defers_effect` (set by `ie_click` from the click's
+  effective mode, explicit `mode` else `IE_CLICK_MODE`; default `args["mode"] == "async"`).
 - **Post-call instrumentation** is one `execute_script` from the top document that walks the
   same-origin frames in JS. It holds the driver lock until it returns, and it is skipped while
   a dialog is open or after an async click.

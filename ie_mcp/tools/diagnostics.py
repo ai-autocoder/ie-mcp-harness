@@ -3,15 +3,25 @@ import json
 import time
 
 from ie_mcp import config
-from ie_mcp.protocol import text_result, tool
+from ie_mcp.protocol import driver_hold, number_arg, text_result, tool
 from ie_mcp.session import SESSION, cleanup_stale_sessions, list_ie_browsers
+
+
+SLEEP_DEFAULT = 1  # seconds, for ie_sleep and its watchdog budget
+STATUS_LOCK_WAIT = 0.5  # seconds ie_status waits for the driver before reporting "busy"
 
 
 @tool(
     "ie_status",
     "Session state as JSON: active/alive, title, url, window_handles, and the "
-    "interaction mode, session identity/directory, and owned browser PIDs/profile.",
+    "interaction mode, session identity/directory, and owned browser PIDs/profile. "
+    "Never waits for a busy browser: while another call holds it, title/url/window_handles "
+    "are left out and \"driver\": \"busy\" is reported.",
     {"type": "object", "properties": {}},
+    needs_driver=False,
+    # It waits STATUS_LOCK_WAIT for the lock itself, so a tiny IE_TOOL_TIMEOUT must not make
+    # the watchdog answer first.
+    budget=lambda args: STATUS_LOCK_WAIT + 5,
 )
 def t_status(args):
     info = {
@@ -26,18 +36,27 @@ def t_status(args):
     if SESSION.driver is None:
         info["alive"] = False
         return text_result(json.dumps(info, indent=2))
-    try:
-        d = SESSION.driver
-        info["alive"] = True
-        info["title"] = d.title
-        info["url"] = d.current_url
+    # ie_status does not take the driver lock through the watchdog (that would make it wait
+    # for, or fail behind, the very call a stuck session needs diagnosing). It asks for the
+    # lock briefly itself and says "busy" if it cannot have it: the driver must not be used
+    # concurrently with the call that holds it.
+    # driver_hold registers ie_status as the holder, so a BUSY answer to another call names it.
+    with driver_hold("ie_status", STATUS_LOCK_WAIT) as got:
+        if not got:
+            info["driver"] = "busy"
+            return text_result(json.dumps(info, indent=2))
         try:
-            info["window_handles"] = len(d.window_handles)
-        except Exception:
-            pass
-    except Exception as exc:
-        info["alive"] = False
-        info["error"] = str(exc).splitlines()[0]
+            d = SESSION.driver
+            info["alive"] = True
+            info["title"] = d.title
+            info["url"] = d.current_url
+            try:
+                info["window_handles"] = len(d.window_handles)
+            except Exception:
+                pass
+        except Exception as exc:
+            info["alive"] = False
+            info["error"] = str(exc).splitlines()[0]
     return text_result(json.dumps(info, indent=2))
 
 
@@ -88,8 +107,9 @@ def t_kill_orphans(args):
         "properties": {"seconds": {"type": "number"}},
     },
     needs_driver=False,
+    budget=lambda args: number_arg(args, "seconds", SLEEP_DEFAULT) + 5,
 )
 def t_sleep(args):
-    secs = float(args.get("seconds", 1))
+    secs = float(args.get("seconds", SLEEP_DEFAULT))
     time.sleep(secs)
     return text_result(f"slept {secs}s")

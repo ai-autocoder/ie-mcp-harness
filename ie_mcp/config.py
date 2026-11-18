@@ -18,6 +18,12 @@ Configuration (all via env vars, all optional):
   IE_PYDEPS         extra sys.path dir for vendored selenium (unset: nothing is added)
   IE_INTERACTION_MODE background (default: native input sent without taking window focus)
                     or native (requires window focus; fallback)
+  IE_TOOL_TIMEOUT   per-tool-call budget in seconds (default 45). A call that needs the browser
+                    and takes longer is answered "BLOCKED:"; tools that wait declare a longer
+                    budget of their own (timeout + wait + margin)
+  IE_CLICK_MODE     driver (default: a WebDriver click) or async (a script click queued with
+                    setTimeout, which cannot block the driver). ie_click's mode argument
+                    overrides it per call
   IE_CLEAN_SESSION  1/true/yes makes IEDriver clear the user's whole IE-mode cookie store
                     and cache at session start and end (default off)
   IE_UPLOAD_DIR     directory ie_upload may read from (unset: uploads are disabled)
@@ -27,6 +33,7 @@ Configuration (all via env vars, all optional):
   IE_LOCK_FILE      session lock file (default <session directory>/session.lock)
   IE_NO_LOCK        1/true/yes disables the session lease (debugging only)
 """
+import math
 import os
 import re
 import sys
@@ -98,6 +105,39 @@ def resolve_interaction_mode(env=None):
     raise ValueError("IE_INTERACTION_MODE must be native or background")
 
 
+# Spike D1: a WebDriver click never blocked the driver on a modal opener, in either interaction
+# mode, and synthetic input (upstream's old "background") clicked nothing, so "async" is
+# never the default. The table is per interaction mode so a later spike can change one.
+DEFAULT_CLICK_MODES = {"background": "driver", "native": "driver"}
+CLICK_MODES = ("driver", "async")
+
+DEFAULT_TOOL_TIMEOUT = 45.0
+
+
+def resolve_click_mode(env, interaction_mode):
+    """``IE_CLICK_MODE`` (driver|async), else the default for the interaction mode."""
+    value = (env.get("IE_CLICK_MODE") or "").strip().lower()
+    if not value:
+        return DEFAULT_CLICK_MODES[interaction_mode.name]
+    if value not in CLICK_MODES:
+        raise ValueError("IE_CLICK_MODE must be driver or async")
+    return value
+
+
+def resolve_tool_timeout(env):
+    """``IE_TOOL_TIMEOUT`` in seconds: a finite number above zero (empty means unset)."""
+    value = (env.get("IE_TOOL_TIMEOUT") or "").strip()
+    if not value:
+        return DEFAULT_TOOL_TIMEOUT
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("IE_TOOL_TIMEOUT must be a number of seconds above zero")
+    return seconds
+
+
 @dataclass(frozen=True)
 class SessionPaths:
     session_id: str
@@ -146,6 +186,8 @@ class Settings:
     clean_session: bool  # opt-in: wipes the user's whole IE-mode cookie store and cache
     upload_dir: Path | None  # None disables ie_upload
     interaction_mode: InteractionMode
+    tool_timeout: float  # seconds; the minimum budget of every tool call
+    click_mode: str  # "driver" or "async": ie_click's default mode
     session_paths: SessionPaths
 
 
@@ -172,6 +214,7 @@ def load_settings(env: Mapping[str, str], pid: int | None = None,
     An ``IE_DRIVER_PATH`` that does not exist is not an error here (the server must still
     start and list its tools); the session reports it when it tries to launch the driver.
     """
+    interaction_mode = resolve_interaction_mode(env)
     driver_path = env.get("IE_DRIVER_PATH") or discover_driver_path(
         env, Path.home() if home is None else home)
     return Settings(
@@ -185,7 +228,9 @@ def load_settings(env: Mapping[str, str], pid: int | None = None,
         pydeps=_optional_path(env, "IE_PYDEPS"),
         clean_session=_flag(env, "IE_CLEAN_SESSION"),
         upload_dir=_optional_absolute_path(env, "IE_UPLOAD_DIR"),
-        interaction_mode=resolve_interaction_mode(env),
+        interaction_mode=interaction_mode,
+        tool_timeout=resolve_tool_timeout(env),
+        click_mode=resolve_click_mode(env, interaction_mode),
         session_paths=build_session_paths(env, pid),
     )
 
