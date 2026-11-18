@@ -118,7 +118,8 @@ modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
 `win32/windows.py` and `win32/htmldoc.py` exist (Task 7); `backends.py`, the `com_*.js`
 scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
 `win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
-exist (Task 9). Keep
+exist (Task 9); `capture/store.py` and `capture/redact.py` exist, and `session.log()` goes
+through `session.REDACTOR` (Task 10). Keep
 this section in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
@@ -457,7 +458,11 @@ Write a code comment for every new quirk you work around; they are rarely obviou
   substrings for password-like names (so `lastName`, `compass` and `keyword` stay visible, while
   `newpassword` and `USERPWD` are caught). It masks every non-trivial value it has redacted
   once, wherever it appears again (short values only as whole tokens): bodies, URLs, console
-  text, dialog summaries and the server log.
+  text, dialog summaries and the server log. In free text (`redact_text`), `name: value` lines
+  count only for secret header names (exact, or hyphenated like `X-Auth-Token`) and
+  password-like or configured field names, so log prose such as `no such session: ...` is never
+  learned as a secret; `name=value` and JSON pairs use the full rules. Secrets are recorded
+  before anything is masked or written.
 - File access from tools (upload, `save_path`) is confined to configured directories.
 - `ie_tabs`/`ie_attach` never list or attach to windows owned by another live ie-mcp session.
 

@@ -14,13 +14,26 @@ import time
 from pathlib import Path
 
 from ie_mcp import config
+from ie_mcp.capture.redact import Redactor
 from ie_mcp.win32.processes import process_identity
 # Re-exported: these are part of this module's public surface (and of upstream's).
 from ie_mcp.config import SessionPaths, build_session_paths  # noqa: F401
 
 
+# The process's redactor: log() and (Task 13) the capture store share it, so a secret seen in
+# traffic is masked in the log too. Built once from the settings at import; a test may replace it.
+REDACTOR = Redactor(
+    config.SETTINGS.capture_redact_fields, config.SETTINGS.capture_redact_headers,
+    enabled=config.SETTINGS.capture_redact)
+
+
 def log(*a):
     msg = "[ie-mcp] " + " ".join(str(x) for x in a)
+    try:
+        msg = REDACTOR.redact_text(msg)
+    except Exception:
+        # Never write a line we could not redact: it may carry a secret.
+        msg = "[ie-mcp] <log line dropped: redaction failed>"
     print(msg, file=sys.stderr, flush=True)
     log_file = config.SETTINGS.session_paths.log_file
     if log_file:

@@ -27,6 +27,14 @@ Configuration (all via env vars, all optional):
   IE_CLEAN_SESSION  1/true/yes makes IEDriver clear the user's whole IE-mode cookie store
                     and cache at session start and end (default off)
   IE_UPLOAD_DIR     directory ie_upload may read from (unset: uploads are disabled)
+  IE_CAPTURE_REDACT 1 (default) redacts secrets in captured traffic, console records and the
+                    server log; 0/false/no/off turns redaction off
+  IE_CAPTURE_REDACT_FIELDS   extra field names to redact (comma-separated; added to the
+                    built-in list, matched case-insensitively)
+  IE_CAPTURE_REDACT_HEADERS  extra header names to redact (same format)
+  IE_CAPTURE_MAX_BODY  bytes kept of each captured request/response body (default 262144)
+  IE_CAPTURE_JSONL  1/true/yes also appends every captured exchange, after redaction, to a
+                    JSONL file (default off)
   IE_SESSION_ID     logical agent/session name (default pid-<mcp process PID>)
   IE_SESSION_ROOT   root for per-session logs, locks, and ownership records
   IE_LOG_FILE       log file (default <session directory>/ie-mcp.log)
@@ -112,6 +120,7 @@ DEFAULT_CLICK_MODES = {"background": "driver", "native": "driver"}
 CLICK_MODES = ("driver", "async")
 
 DEFAULT_TOOL_TIMEOUT = 45.0
+DEFAULT_CAPTURE_MAX_BODY = 262144
 
 
 def resolve_click_mode(env, interaction_mode):
@@ -189,10 +198,40 @@ class Settings:
     tool_timeout: float  # seconds; the minimum budget of every tool call
     click_mode: str  # "driver" or "async": ie_click's default mode
     session_paths: SessionPaths
+    capture_redact: bool = True
+    capture_redact_fields: frozenset[str] = frozenset()  # extra field names, lower case
+    capture_redact_headers: frozenset[str] = frozenset()  # extra header names, lower case
+    capture_max_body: int = DEFAULT_CAPTURE_MAX_BODY
+    capture_jsonl: bool = False
 
 
 def _flag(env, name):
     return env.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def _flag_default_on(env, name):
+    """A switch that is on unless explicitly turned off: a typo must not disable redaction."""
+    return env.get(name, "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _name_set(env, name):
+    """Comma-separated names: stripped, lower-cased, empties dropped."""
+    return frozenset(part.strip().lower() for part in env.get(name, "").split(",")
+                     if part.strip())
+
+
+def resolve_capture_max_body(env):
+    """``IE_CAPTURE_MAX_BODY``: bytes kept per captured body, zero or more (empty means unset)."""
+    value = (env.get("IE_CAPTURE_MAX_BODY") or "").strip()
+    if not value:
+        return DEFAULT_CAPTURE_MAX_BODY
+    try:
+        size = int(value)
+    except ValueError:
+        size = -1
+    if size < 0:
+        raise ValueError("IE_CAPTURE_MAX_BODY must be a number of bytes, zero or more")
+    return size
 
 
 def _optional_path(env, name):
@@ -232,6 +271,11 @@ def load_settings(env: Mapping[str, str], pid: int | None = None,
         tool_timeout=resolve_tool_timeout(env),
         click_mode=resolve_click_mode(env, interaction_mode),
         session_paths=build_session_paths(env, pid),
+        capture_redact=_flag_default_on(env, "IE_CAPTURE_REDACT"),
+        capture_redact_fields=_name_set(env, "IE_CAPTURE_REDACT_FIELDS"),
+        capture_redact_headers=_name_set(env, "IE_CAPTURE_REDACT_HEADERS"),
+        capture_max_body=resolve_capture_max_body(env),
+        capture_jsonl=_flag(env, "IE_CAPTURE_JSONL"),
     )
 
 

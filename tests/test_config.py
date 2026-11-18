@@ -126,6 +126,42 @@ class SettingsTests(unittest.TestCase):
     def test_driver_path_comes_from_env_when_given(self):
         self.assertEqual(_settings({"IE_DRIVER_PATH": "x.exe"}).driver_path, "x.exe")
 
+    def test_capture_defaults(self):
+        settings = _settings({})
+
+        self.assertTrue(settings.capture_redact)
+        self.assertEqual(settings.capture_redact_fields, set())
+        self.assertEqual(settings.capture_redact_headers, set())
+        self.assertEqual(settings.capture_max_body, 262144)
+        self.assertFalse(settings.capture_jsonl)
+
+    def test_capture_redact_is_on_unless_explicitly_turned_off(self):
+        for value in ("0", "false", "No", "off", " OFF "):
+            self.assertFalse(_settings({"IE_CAPTURE_REDACT": value}).capture_redact, value)
+        for value in ("", "1", "true", "yes", "ture"):  # a typo must not disable redaction
+            self.assertTrue(_settings({"IE_CAPTURE_REDACT": value}).capture_redact, value)
+
+    def test_capture_redact_names_are_stripped_lowercased_and_empties_dropped(self):
+        settings = _settings({"IE_CAPTURE_REDACT_FIELDS": " BadgeNo, ,Ssn,, ",
+                              "IE_CAPTURE_REDACT_HEADERS": "X-Badge,"})
+
+        self.assertEqual(settings.capture_redact_fields, {"badgeno", "ssn"})
+        self.assertEqual(settings.capture_redact_headers, {"x-badge"})
+
+    def test_capture_max_body_and_jsonl(self):
+        settings = _settings({"IE_CAPTURE_MAX_BODY": "1024", "IE_CAPTURE_JSONL": "1"})
+
+        self.assertEqual(settings.capture_max_body, 1024)
+        self.assertTrue(settings.capture_jsonl)
+        self.assertEqual(_settings({"IE_CAPTURE_MAX_BODY": "0"}).capture_max_body, 0)
+        self.assertEqual(_settings({"IE_CAPTURE_MAX_BODY": " "}).capture_max_body, 262144)
+        self.assertFalse(_settings({"IE_CAPTURE_JSONL": "0"}).capture_jsonl)
+
+    def test_invalid_capture_max_body_is_rejected(self):
+        for value in ("abc", "-1", "1.5"):
+            with self.assertRaises(ValueError, msg=value):
+                _settings({"IE_CAPTURE_MAX_BODY": value})
+
 
 if __name__ == "__main__":
     unittest.main()

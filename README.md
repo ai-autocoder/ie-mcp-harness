@@ -148,7 +148,8 @@ to run them, but it is notoriously awkward to automate:
 - **Screenshots** (full window or single element), JS execution, history navigation, resize.
 - **One browser per MCP process**, with parallel agents isolated by session identity.
 - **Atomic per-session leases** prevent two processes from claiming the same explicit identity.
-- **Session-scoped logs and ownership records** under `%TEMP%\ie-mcp\sessions\<session-id>`.
+- **Session-scoped logs and ownership records** under `%TEMP%\ie-mcp\sessions\<session-id>`;
+  the log is redacted (passwords, tokens, cookies; see `IE_CAPTURE_REDACT`).
 - **Safe orphan cleanup** kills only browsers proven to belong to a crashed session; live agents
   and untracked Edge processes are preserved.
 - **No required pip install** — selenium can be loaded from a vendored deps folder.
@@ -186,6 +187,11 @@ All configuration is via environment variables — **all optional**:
 | `IE_CLICK_MODE` | `driver` | Default of `ie_click`'s `mode`: `driver` (a WebDriver click) or `async` (a script click queued with `setTimeout`; see `ie_click`). |
 | `IE_CLEAN_SESSION` | `0` | `1`/`true`/`yes` makes IEDriver clear the **whole** IE-mode cookie store and cache of the current user (not just this session's) when the session starts and ends. Off by default; turning it on logs you out of your own IE-mode sites. |
 | `IE_UPLOAD_DIR` | *(unset)* | Directory `ie_upload` may read from. Unset: uploads are disabled. A path must resolve inside it (relative paths are taken relative to it). |
+| `IE_CAPTURE_REDACT` | `1` | Redaction of secrets in the server log now, and in captured traffic and console records once capture lands. On unless set to `0`/`false`/`no`/`off` (a typo cannot turn it off). Field and header names are split into word segments (`lastName`, `compass`, `keyword` stay visible); password-like names match as substrings (`newpassword`, `USERPWD`). Every non-trivial value redacted once (4+ characters, not `true`/`on`/... or a short number) is masked as `<redacted>` wherever it appears again; values under 8 characters only as whole tokens. Each `Cookie`/`Set-Cookie` value is tracked, so a harmless cookie such as `theme=dark` also masks the word `dark` elsewhere. In free text, `name: value` lines are redacted only for secret header names (`Authorization`, `Cookie`, hyphenated ones like `X-Auth-Token`) and password-like or configured field names; `name=value` and JSON pairs use the full rules. |
+| `IE_CAPTURE_REDACT_FIELDS` | *(unset)* | Extra field names to redact, comma-separated, added to the built-in list (matched case-insensitively, whole name). |
+| `IE_CAPTURE_REDACT_HEADERS` | *(unset)* | Extra header names to redact, comma-separated, added to the built-in list. |
+| `IE_CAPTURE_MAX_BODY` | `262144` | Bytes kept of each captured request or response body; longer bodies are redacted in full, then cut and marked truncated. |
+| `IE_CAPTURE_JSONL` | `0` | `1`/`true`/`yes` also appends every captured exchange, after redaction, to a JSONL file. A value learned as secret only after a line was written is not masked in that earlier line (the in-memory store re-masks on read). |
 | `IE_LOG_FILE` | `<session-dir>\ie-mcp.log` | Optional override for this session's log file. |
 | `IE_SESSION_ID` | `pid-<MCP process PID>` | Stable agent/session name. Different IDs can run concurrently; the same ID is exclusive. |
 | `IE_SESSION_ROOT` | `%TEMP%\ie-mcp\sessions` | Root for session directories containing logs, leases, and ownership records. |

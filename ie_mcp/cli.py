@@ -112,7 +112,8 @@ def main():
     ensure_ie_policies()
     acquire_lock()
     paths = config.SETTINGS.session_paths
-    log(f"ready session={paths.session_id} directory={paths.directory}")
+    # Not "session=": that is a secret field name, so the log would redact (and then mask) the id.
+    log(f"ready id={paths.session_id} directory={paths.directory}")
     try:
         serve(sys.stdin, sys.stdout)
     finally:
