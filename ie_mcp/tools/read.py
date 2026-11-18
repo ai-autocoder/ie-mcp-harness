@@ -288,6 +288,7 @@ def t_wait_text(args):
     elapsed = 0
     last = ""
     while True:
+        SESSION.check_cancel()  # outside the try below: not a transient failure
         # A whole round can fail transiently while the app navigates (IEDriver
         # briefly reports "Unable to get browser"); treat that as "not yet".
         found_in = None
@@ -338,7 +339,7 @@ def t_wait_text(args):
                 "ok": False, "found": found_in is not None, "after_seconds": elapsed,
                 "timed_out": True, "last_preview": last[:600],
             }, indent=2))
-        time.sleep(interval)
+        SESSION.pause(interval)
         elapsed += interval
 
 
@@ -382,6 +383,7 @@ def t_wait_ready(args):
     stable = 0
     last = {"loaded": False, "stage": "init"}
     while True:
+        SESSION.check_cancel()
         try:
             d.switch_to.default_content()
             raw = d.execute_script(js.load("ready_probe.js"))
@@ -415,7 +417,7 @@ def t_wait_ready(args):
         if elapsed >= timeout:
             last["timed_out"] = True
             return text_result(json.dumps(last, indent=2))
-        time.sleep(interval)
+        SESSION.pause(interval)
         elapsed += interval
 
 
@@ -447,6 +449,7 @@ def t_wait_element(args):
     d = SESSION.ensure()
     elapsed = 0
     while True:
+        SESSION.check_cancel()
         present = False
         try:
             SESSION._apply_frame(frame)
@@ -465,5 +468,5 @@ def t_wait_element(args):
             return text_result(json.dumps({
                 "ok": False, "present": present, "after_seconds": elapsed, "timed_out": True,
             }))
-        time.sleep(interval)
+        SESSION.pause(interval)
         elapsed += interval

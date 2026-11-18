@@ -160,7 +160,7 @@ to run them, but it is notoriously awkward to automate:
 
 | Component | Notes |
 |-----------|-------|
-| **Windows** | IE mode only exists on Windows; the process-tracking and policy code use `tasklist`, `taskkill`, PowerShell/CIM and `winreg`. |
+| **Windows** | IE mode only exists on Windows; the process-tracking and policy code use `tasklist`, `taskkill` (never `/T`), PowerShell/CIM, `winreg` and Win32 process APIs (ctypes). |
 | **Microsoft Edge** | With IE mode available (Edge ships it on Windows 10/11). |
 | **IEDriverServer.exe** | The Selenium IE driver (e.g. `4.14.0`). |
 | **Python 3.8+** | Standard library only, plus selenium. |
@@ -201,7 +201,7 @@ All configuration is via environment variables — **all optional**:
 | `ie_goto` | Navigate the current session to a new URL. |
 | `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs). |
 | `ie_browsers` | List all Edge IE-mode windows + IEDriver processes, flagging the one this session owns. |
-| `ie_kill_orphans` | Terminate processes recorded for crashed sessions only; never kills live-agent or unknown browsers. |
+| `ie_kill_orphans` | Terminate processes recorded for crashed sessions only (Edge profile and recorded image name + creation time must still match); never kills live-agent or unknown browsers. |
 | `ie_frames` | List the frames/iframes of the current page (index, name, id, src). |
 | `ie_text` | Get visible text of the page or a specific frame. |
 | `ie_html` | Get HTML source of the page or a frame. |
@@ -223,7 +223,7 @@ All configuration is via environment variables — **all optional**:
 | `ie_scroll` | Scroll an element into view, to top/bottom, or by pixels. |
 | `ie_grid` | Extract a tabular grid as structured (header-keyed) rows. |
 | `ie_sleep` | Sleep N seconds (last resort; prefer `ie_wait_ready` / `ie_wait_text`). |
-| `ie_close` | Close the session and quit the browser. |
+| `ie_close` | Quit the browser; the session lease stays with this server. `force=true` never talks to the driver: it cancels running waits and kills this session's own Edge and IEDriver after an identity check (use it when the driver hangs). |
 
 ### Working with frames
 
@@ -300,7 +300,8 @@ Running straight from the clone without installing also works — `python -m ie_
 
 - `ie_mcp/config.py` — `Settings`: every env var, read once (`config.SETTINGS`).
 - `ie_mcp/session.py` — the IEDriver wrapper (`IeSession`), session leases, process
-  tracking and orphan cleanup.
+  tracking, identity-checked killing (`kill_verified`) and orphan cleanup.
+- `ie_mcp/win32/processes.py` — `process_identity` (image name + creation time, ctypes).
 - `ie_mcp/protocol.py` — the stdio JSON-RPC loop and the `@tool` registry.
 - `ie_mcp/tools/` — one `t_*` function per tool, grouped in `navigation.py`, `read.py`,
   `interact.py`, `dialogs.py` and `diagnostics.py`.

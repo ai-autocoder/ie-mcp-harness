@@ -96,9 +96,23 @@ def t_resize(args):
 
 @tool(
     "ie_close",
-    "Close the IE-mode session and quit the browser.",
-    {"type": "object", "properties": {}},
+    "Close the IE-mode session and quit the browser. The session name stays reserved for "
+    "this server; ie_open starts a new browser. With force=true, running waits are cancelled "
+    "and this session's own IEDriver and Edge are killed (only if they are still the "
+    "recorded processes) without calling the driver at all: use it when a call hangs or the "
+    "page is stuck in a dialog.",
+    {
+        "type": "object",
+        "properties": {
+            "force": {"type": "boolean",
+                      "description": "cancel waits and kill the browser without asking the driver (default false)"},
+        },
+    },
+    needs_driver=lambda args: not args.get("force"),
 )
 def t_close(args):
-    SESSION.quit()
+    if args.get("force"):
+        killed = SESSION.force_kill()
+        return text_result(f"session force-closed; killed pids: {killed}")
+    SESSION.quit_browser()
     return text_result("session closed")

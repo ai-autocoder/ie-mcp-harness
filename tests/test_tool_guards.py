@@ -186,7 +186,7 @@ class ScreenshotGuardTests(ToolGuardTestCase):
         paths = self.use_settings()
         _call("ie_screenshot", {"save_path": "shot.png", "no_inline": True})
 
-        with mock.patch.object(SESSION, "quit"):
+        with mock.patch.object(SESSION, "quit_browser"):
             _call("ie_close")
         # And the real cleanup path never removes it either.
         from ie_mcp import session

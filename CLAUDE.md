@@ -113,8 +113,9 @@ asserts it, and `ie_browsers` shows what is running.
 ## Architecture
 
 Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the package below.
-Modules the later tasks add (`backends.py`, `png.py`, `win32/`, `capture/`, further `tools/`
-modules and `js/` scripts) are listed here as the target. Keep this section in sync with the
+Modules the later tasks add (`backends.py`, `png.py`, the rest of `win32/`, `capture/`, further
+`tools/` modules and `js/` scripts) are listed here as the target; `win32/processes.py` exists
+(Task 5: `process_identity` only, ctypes, no pywin32). Keep this section in sync with the
 plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
@@ -186,6 +187,20 @@ the upstream code behaves as before:
   `ie_screenshot` `save_path` is a bare file name saved in `<session dir>/screenshots/` and kept.
   `ie_text` falls back to `document.body.innerText`; `ie_frames` reads `name`/`id`/`src` with
   `js/frames.js`. `ie_open` needs an http(s) URL in IE mode.
+- **Session lifecycle (plan Task 5, done).** `session.kill_verified` is the only kill path
+  (`taskkill /F /PID`, no `/T`, only when `process_identity` still equals the recorded image
+  name + creation time; a recorded `None` or malformed identity never kills). `owner.json`
+  records `driver_identity`/`edge_identity`; a dead holder's record is kept as
+  `owner.stale-<pid>.json` and `cleanup_stale_sessions` (globs `*/owner*.json`) needs both the
+  profile and the identity match. Our Edge is adopted only if it is the single new IE-mode
+  row with a new `IEDriver-<uuid>` profile whose parent PID is our IEDriver (verified on the
+  development machine). `webdriver.Ie` creation runs in a thread joined for 60 s
+  (`SESSION_CREATE_TIMEOUT`); on timeout our own IEDriver and new Edge are reaped and
+  `ensure()` retries while holding the lease. `quit_browser()` keeps the lease, `close()`
+  (cli exit) releases it, unless a process survived the kill. `SESSION.cancel` stops
+  `ie_wait_ready`/`ie_wait_text`/`ie_wait_element`/`find` with `Cancelled`; `ensure()` clears
+  it. `ie_close(force=true)` never calls the driver. `ie_sleep` and `wait=` sleeps are not
+  cancellable yet.
 
 ## Trident rules for injected JavaScript
 

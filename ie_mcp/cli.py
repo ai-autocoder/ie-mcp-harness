@@ -7,7 +7,7 @@ import time
 from ie_mcp import config
 from ie_mcp import tools  # noqa: F401  (registers every tool)
 from ie_mcp.protocol import serve
-from ie_mcp.session import SESSION, acquire_lock, ensure_ie_policies, log, release_lock
+from ie_mcp.session import SESSION, acquire_lock, ensure_ie_policies, log
 
 
 def selftest():
@@ -44,7 +44,7 @@ def selftest():
     except Exception as exc:
         print(f"  session: FAIL ({exc})"); ok = False
     finally:
-        SESSION.quit()
+        SESSION.close()
     print("RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -116,8 +116,7 @@ def main():
     try:
         serve(sys.stdin, sys.stdout)
     finally:
-        SESSION.quit()
-        release_lock()
+        SESSION.close()  # also releases the lease
 
 
 if __name__ == "__main__":
