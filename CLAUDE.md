@@ -98,9 +98,9 @@ python -m ie_mcp_fixtures
 
 # check the setup end to end. Until plan Task 4 the selftest clears your IE-mode cookies and
 # cache (upstream forces ensure_clean_session); the plan avoids running it before then.
-ie-mcp --selftest            # needs `pip install -e .`; or: python ie_mcp.py --selftest before plan Task 3
+ie-mcp --selftest            # needs `pip install -e .`; or: python -m ie_mcp --selftest
 
-# register a dev copy with Claude Code for manual testing (after plan Task 3)
+# register a dev copy with Claude Code for manual testing
 claude mcp add ie-mcp-dev -e IE_INTERACTION_MODE=background -- python -m ie_mcp
 ```
 
@@ -111,8 +111,14 @@ asserts it, and `ie_browsers` shows what is running.
 
 ## Architecture
 
-Upstream is a single file, `ie_mcp.py`. Plan Task 3 splits it into the package below; until
-then the single file is the code. Keep this section in sync with the plan and the code.
+Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the package below.
+Modules the later tasks add (`backends.py`, `png.py`, `win32/`, `capture/`, further `tools/`
+modules and `js/` scripts) are listed here as the target. Keep this section in sync with the
+plan and the code.
+
+Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
+`from ie_mcp.config import SETTINGS`), so tests can replace it. Tools register themselves with
+`@tool` from `ie_mcp.protocol`, and `ie_mcp/tools/__init__.py` imports every tool module.
 
 ```
 ie_mcp/
@@ -275,7 +281,7 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 - If the per-process proxy hook fails, IEDriver only logs "Proxy will not be set!"; the session
   must verify that the proxy saw traffic.
 - `ensure_clean_session=True` clears the user's whole IE-mode cookie store and cache, not only
-  the session's. Upstream forces it on (`ie_mcp.py`, `IeSession._build`); plan Task 4 makes it
+  the session's. Upstream forces it on (`ie_mcp/session.py`, `IeSession._build`); plan Task 4 makes it
   opt-in (`IE_CLEAN_SESSION=1`).
 - With default Internet Options IE maps `127.0.0.1` to the Internet zone (Protected Mode on)
   and the dotless `localhost` to the Local intranet zone (Protected Mode off, intranet

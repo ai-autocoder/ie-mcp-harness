@@ -240,7 +240,7 @@ On locked-down or offline machines you can run without a global `pip install`. D
 pip install --target ../.pydeps "selenium>=4.14.0,<5"
 ```
 
-By default the server looks for `../.pydeps` relative to `ie_mcp.py`, so the MCP protocol
+By default the server looks for `../.pydeps` relative to the repository directory, so the MCP protocol
 itself has **zero** pip dependencies (newline-delimited JSON-RPC 2.0 is implemented inline).
 
 ---
@@ -277,8 +277,8 @@ policy and assumes Edge is already configured for IE mode.
 
 ## Development
 
-This is a single-file server (`ie_mcp.py`). Install it editable so the `ie-mcp` command
-points at your working copy:
+The server is the `ie_mcp` package: a tool registry plus one module per group of tools.
+Install it editable so the `ie-mcp` command points at your working copy:
 
 ```bash
 git clone https://github.com/thomfilg/ie-mcp.git
@@ -289,21 +289,30 @@ pip install -e .          # or: pipx install --editable .
 ie-mcp --selftest
 ```
 
-Running straight from the clone without installing also works — `python ie_mcp.py
---selftest` / `--install` fall back to launching the file by absolute path.
+Running straight from the clone without installing also works — `python -m ie_mcp
+--selftest` (from the repository directory) / `--install` fall back to launching
+`ie_mcp/__main__.py` by absolute path.
 
 **Project layout**
 
-- `ie_mcp.py` — the entire server: config, the IEDriver wrapper (`IeSession`), one
-  `t_*` function per tool, the `TOOLS` registry, the `--install`/`--selftest` CLI,
-  and the stdio JSON-RPC loop.
-- `pyproject.toml` — packaging + the `ie-mcp` console-script entry point.
+- `ie_mcp/config.py` — `Settings`: every env var, read once (`config.SETTINGS`).
+- `ie_mcp/session.py` — the IEDriver wrapper (`IeSession`), session leases, process
+  tracking and orphan cleanup.
+- `ie_mcp/protocol.py` — the stdio JSON-RPC loop and the `@tool` registry.
+- `ie_mcp/tools/` — one `t_*` function per tool, grouped in `navigation.py`, `read.py`,
+  `interact.py`, `dialogs.py` and `diagnostics.py`.
+- `ie_mcp/js/` — the ES3 scripts injected into the page (`select.js`, `grid.js`,
+  `ready_probe.js`).
+- `ie_mcp/cli.py` — the `--install`/`--selftest` CLI and the server start-up.
+- `pyproject.toml` — packaging + the `ie-mcp` console-script entry point (`ie_mcp.cli:main`).
 - `requirements.txt` — runtime deps (just selenium; mirrors `pyproject.toml`).
 
 **Adding a tool**
 
-1. Write a `t_<name>(args)` function that returns `text_result(...)` (or an image result).
-2. Append an entry to the `TOOLS` list with `name`, `description`, `inputSchema`, and `fn`.
+1. In the matching module under `ie_mcp/tools/`, write a `t_<name>(args)` function that
+   returns `text_result(...)` (or `image_result(...)`).
+2. Register it with the `@tool(name, description, schema)` decorator from
+   `ie_mcp.protocol`; `ie_mcp/tools/__init__.py` imports every tool module.
 3. Keep it **Trident-safe**: prefer direct `arguments[0].innerText` / `getAttribute` over
    Selenium's JS atoms, and never rely on `window.JSON` inside injected scripts (IE7/quirks
    document modes don't have it — return delimited strings and parse them in Python).
@@ -366,7 +375,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 Bug reports and PRs are welcome. Please:
 
-- Keep the server **single-file and dependency-light** (selenium is the only runtime dep).
+- Keep the server **dependency-light** (selenium is the only runtime dep).
 - Match the existing tool conventions (auto-waiting `find`, `frame` arg, `text_result`).
 - Note any IE-mode / Trident quirk you worked around in a code comment — they're rarely obvious.
 

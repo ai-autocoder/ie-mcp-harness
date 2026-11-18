@@ -24,12 +24,13 @@ Repository = "https://github.com/thomfilg/ie-mcp"
 
 # Exposes `ie-mcp` on PATH so MCP clients launch it by name (no python path).
 [project.scripts]
-ie-mcp = "ie_mcp:main"
+ie-mcp = "ie_mcp.cli:main"
 
-[tool.setuptools]
-py-modules = ["ie_mcp"]
-# Legacy fixture site, shipped so `--selftest` works from a pip install.
-packages = ["ie_mcp_fixtures"]
+# "ie_mcp*" matches the server package and ie_mcp_fixtures (the legacy fixture site,
+# shipped so `--selftest` works from a pip install).
+[tool.setuptools.packages.find]
+include = ["ie_mcp*"]
 
 [tool.setuptools.package-data]
+"ie_mcp.js" = ["*.js"]
 ie_mcp_fixtures = ["site/*"]

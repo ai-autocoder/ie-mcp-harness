@@ -4,14 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import ie_mcp
+from ie_mcp import session
 
 
 class SessionPathTests(unittest.TestCase):
     def test_paths_are_scoped_to_the_configured_session(self):
-        self.assertTrue(hasattr(ie_mcp, "build_session_paths"), "session-scoped paths are required")
+        self.assertTrue(hasattr(session, "build_session_paths"), "session-scoped paths are required")
         with tempfile.TemporaryDirectory() as root:
-            paths = ie_mcp.build_session_paths(
+            paths = session.build_session_paths(
                 env={"IE_SESSION_ID": "Agent 1 / GTA", "IE_SESSION_ROOT": root},
                 pid=42,
             )
@@ -23,26 +23,26 @@ class SessionPathTests(unittest.TestCase):
             self.assertEqual(paths.owner_file, paths.directory / "owner.json")
 
     def test_default_session_id_is_unique_to_the_mcp_process(self):
-        self.assertTrue(hasattr(ie_mcp, "build_session_paths"), "automatic process IDs are required")
+        self.assertTrue(hasattr(session, "build_session_paths"), "automatic process IDs are required")
         with tempfile.TemporaryDirectory() as root:
-            paths = ie_mcp.build_session_paths(env={"IE_SESSION_ROOT": root}, pid=314)
+            paths = session.build_session_paths(env={"IE_SESSION_ROOT": root}, pid=314)
 
             self.assertEqual(paths.session_id, "pid-314")
 
 
 class SessionLeaseTests(unittest.TestCase):
     def test_same_session_id_is_exclusive_but_different_sessions_are_parallel(self):
-        self.assertTrue(hasattr(ie_mcp, "SessionLease"), "atomic per-session leases are required")
+        self.assertTrue(hasattr(session, "SessionLease"), "atomic per-session leases are required")
         with tempfile.TemporaryDirectory() as root:
-            first_paths = ie_mcp.build_session_paths(
+            first_paths = session.build_session_paths(
                 env={"IE_SESSION_ID": "agent-a", "IE_SESSION_ROOT": root}, pid=101
             )
-            second_paths = ie_mcp.build_session_paths(
+            second_paths = session.build_session_paths(
                 env={"IE_SESSION_ID": "agent-b", "IE_SESSION_ROOT": root}, pid=202
             )
-            first = ie_mcp.SessionLease(first_paths, pid=101, pid_alive=lambda pid: pid == 101)
-            duplicate = ie_mcp.SessionLease(first_paths, pid=202, pid_alive=lambda pid: pid == 101)
-            second = ie_mcp.SessionLease(second_paths, pid=202, pid_alive=lambda pid: True)
+            first = session.SessionLease(first_paths, pid=101, pid_alive=lambda pid: pid == 101)
+            duplicate = session.SessionLease(first_paths, pid=202, pid_alive=lambda pid: pid == 101)
+            second = session.SessionLease(second_paths, pid=202, pid_alive=lambda pid: True)
 
             first.acquire()
             second.acquire()
@@ -54,14 +54,14 @@ class SessionLeaseTests(unittest.TestCase):
 
     def test_stale_session_lease_is_reclaimed_atomically(self):
         with tempfile.TemporaryDirectory() as root:
-            paths = ie_mcp.build_session_paths(
+            paths = session.build_session_paths(
                 env={"IE_SESSION_ID": "agent-a", "IE_SESSION_ROOT": root}, pid=202
             )
             paths.directory.mkdir(parents=True)
             paths.lock_file.write_text(
                 json.dumps({"session_id": "agent-a", "owner_pid": 101}), encoding="utf-8"
             )
-            lease = ie_mcp.SessionLease(paths, pid=202, pid_alive=lambda _pid: False)
+            lease = session.SessionLease(paths, pid=202, pid_alive=lambda _pid: False)
 
             lease.acquire()
 
@@ -79,7 +79,7 @@ class CleanupTests(unittest.TestCase):
         )
 
     def test_cleanup_kills_only_processes_owned_by_stale_sessions(self):
-        self.assertTrue(hasattr(ie_mcp, "cleanup_stale_sessions"), "scoped cleanup is required")
+        self.assertTrue(hasattr(session, "cleanup_stale_sessions"), "scoped cleanup is required")
         with tempfile.TemporaryDirectory() as root:
             self._write_owner(
                 root,
@@ -106,7 +106,7 @@ class CleanupTests(unittest.TestCase):
             ]
             killed = []
 
-            result = ie_mcp.cleanup_stale_sessions(
+            result = session.cleanup_stale_sessions(
                 Path(root),
                 browser_rows=browser_rows,
                 pid_alive=lambda pid: pid == 11,
@@ -134,7 +134,7 @@ class CleanupTests(unittest.TestCase):
             ]
             killed = []
 
-            result = ie_mcp.cleanup_stale_sessions(
+            result = session.cleanup_stale_sessions(
                 Path(root),
                 browser_rows=browser_rows,
                 pid_alive=lambda _pid: False,
