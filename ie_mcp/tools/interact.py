@@ -1,8 +1,9 @@
 """Tools that act on the page: click, fill, select, keys, hover, scroll, upload, script."""
 import json
 import time
+from pathlib import Path
 
-from ie_mcp import js
+from ie_mcp import config, js
 from ie_mcp.protocol import text_result, tool
 from ie_mcp.session import SESSION
 
@@ -228,15 +229,40 @@ def t_scroll(args):
     return text_result(f"scrolled by ({dx},{dy})")
 
 
+def _upload_target(path, upload_dir):
+    """Resolve ``path`` (relative paths against ``upload_dir``) to an existing file inside it.
+
+    Uses Path.resolve(), which follows symlinks and junctions and collapses "..", and a
+    real containment test (not a string prefix: "uploads-evil" is not inside "uploads").
+    """
+    if upload_dir is None:
+        raise ValueError("uploads are disabled: set IE_UPLOAD_DIR to the directory files "
+                         "may be uploaded from")
+    base = Path(upload_dir).resolve()
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(base)
+    except ValueError:
+        raise ValueError(f"path {path!r} is outside IE_UPLOAD_DIR ({base})") from None
+    if not resolved.is_file():
+        raise ValueError(f"no such file inside IE_UPLOAD_DIR: {resolved}")
+    return resolved
+
+
 @tool(
     "ie_upload",
-    "Set a file <input type=file> by sending a local file path.",
+    "Set a file <input type=file> by sending a local file path. Only files inside the "
+    "directory configured with IE_UPLOAD_DIR can be uploaded (disabled when it is unset).",
     {
         "type": "object",
         "properties": {
             "by": {"type": "string"},
             "value": {"type": "string"},
-            "path": {"type": "string", "description": "absolute local file path"},
+            "path": {"type": "string",
+                     "description": "file inside IE_UPLOAD_DIR: relative to it, or absolute"},
             "frame": {"type": ["string", "integer"]},
         },
         "required": ["by", "value", "path"],
@@ -244,9 +270,10 @@ def t_scroll(args):
 )
 def t_upload(args):
     """Set a file <input type=file> by sending the local file path."""
+    target = _upload_target(args["path"], config.SETTINGS.upload_dir)
     el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
-    el.send_keys(args["path"])
-    return text_result(f"uploaded {args['path']} -> {args['by']}={args['value']}")
+    el.send_keys(str(target))
+    return text_result(f"uploaded {target} -> {args['by']}={args['value']}")
 
 
 @tool(

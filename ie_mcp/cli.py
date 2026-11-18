@@ -22,9 +22,12 @@ def selftest():
     except Exception as exc:
         print(f"  selenium: FAIL ({exc})"); ok = False
     for label, path in [("edge", settings.edge_path), ("iedriver", settings.driver_path)]:
-        exists = os.path.exists(path)
-        print(f"  {label}: {'OK' if exists else 'MISSING'} {path}")
+        exists = bool(path) and os.path.exists(path)
+        shown = path or "(not found; set IE_DRIVER_PATH)"
+        print(f"  {label}: {'OK' if exists else 'MISSING'} {shown}")
         ok = ok and exists
+    print(f"  interaction_mode: {settings.interaction_mode.name}")
+    print(f"  clean_session: {'ON (clears the IE-mode cookie store and cache)' if settings.clean_session else 'off'}")
     print(f"  site_list: {settings.site_list or '(none)'}")
     print(f"  default_url: {settings.default_url}")
     print("  opening a session ...")

@@ -175,13 +175,15 @@ All configuration is via environment variables — **all optional**:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `IE_EDGE_PATH` | `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` | Path to `msedge.exe`. |
-| `IE_DRIVER_PATH` | *(per-user cache path)* | Path to `IEDriverServer.exe`. |
+| `IE_DRIVER_PATH` | *(unset)* | Path to `IEDriverServer.exe`. Unset: the highest version under `%USERPROFILE%\.cache\selenium\IEDriverServer\win32\<version>\` (then `win64`); if none is found the first session start fails and tells you to set this. A path that does not exist is an error, never silently replaced. 32-bit `4.14.0` is the reference build. |
 | `IE_SITE_LIST` | *(unset)* | Path to an Edge IE-mode site-list XML. If set, the server verifies the HKCU Edge policy points at it so listed sites render in IE mode. If unset, no policy is managed and Edge is assumed already configured. |
-| `IE_DEFAULT_URL` | `about:blank` | URL `ie_open` uses when none is given. |
+| `IE_DEFAULT_URL` | `about:blank` | URL `ie_open` uses when none is given. In IE mode an **http(s) URL is required** to start a session (`about:blank` renders in Chromium and IEDriver finds no IE window), so pass `url` to `ie_open` or set this. |
 | `IE_ATTACH_RETRIES` | `3` | IEDriver attach attempts. |
 | `IE_PAGE_TIMEOUT` | `30` | Per-page load timeout (seconds). |
-| `IE_PYDEPS` | `../.pydeps` | Extra `sys.path` dir for vendored selenium. |
-| `IE_INTERACTION_MODE` | `native` | Input strategy: `background` avoids forced focus and physical mouse input; `native` uses focused OS events for maximum legacy compatibility. Selected when the MCP process starts. |
+| `IE_PYDEPS` | *(unset)* | Extra `sys.path` dir for vendored selenium. Nothing is added unless you set it (there is no implicit `../.pydeps`). |
+| `IE_INTERACTION_MODE` | `background` | Input strategy: `background` (default) sends native input as window messages without taking window focus or the physical mouse; `native` requires window focus and is the compatibility fallback (it takes focus and can mix with your own keystrokes and mouse). Selected when the MCP process starts. |
+| `IE_CLEAN_SESSION` | `0` | `1`/`true`/`yes` makes IEDriver clear the **whole** IE-mode cookie store and cache of the current user (not just this session's) when the session starts and ends. Off by default; turning it on logs you out of your own IE-mode sites. |
+| `IE_UPLOAD_DIR` | *(unset)* | Directory `ie_upload` may read from. Unset: uploads are disabled. A path must resolve inside it (relative paths are taken relative to it). |
 | `IE_LOG_FILE` | `<session-dir>\ie-mcp.log` | Optional override for this session's log file. |
 | `IE_SESSION_ID` | `pid-<MCP process PID>` | Stable agent/session name. Different IDs can run concurrently; the same ID is exclusive. |
 | `IE_SESSION_ROOT` | `%TEMP%\ie-mcp\sessions` | Root for session directories containing logs, leases, and ownership records. |
@@ -205,10 +207,10 @@ All configuration is via environment variables — **all optional**:
 | `ie_html` | Get HTML source of the page or a frame. |
 | `ie_click` | Click an element (auto-waits); `click` / `double` / `right`. |
 | `ie_fill` | Type text into an input/textarea (auto-waits). |
-| `ie_upload` | Set a `<input type=file>` by sending a local path. |
+| `ie_upload` | Set a `<input type=file>` by sending a local path; only files inside `IE_UPLOAD_DIR` (disabled when unset). |
 | `ie_dialog` | Handle a JS dialog (`accept` / `dismiss` / `text` / `sendkeys`). |
 | `ie_js` | Execute JavaScript in the page or a frame and return the result. |
-| `ie_screenshot` | PNG screenshot of the window, or of a single element. |
+| `ie_screenshot` | PNG screenshot of the window, or of a single element. `save_path` must be a bare file name; it is saved in `<session dir>\screenshots\` and kept after `ie_close`. |
 | `ie_wait_text` | Poll until a substring appears (or disappears) in the page text. |
 | `ie_wait_ready` | Wait until the page (and same-origin frames) finish loading and settle. |
 | `ie_select` | Select an `<option>` by label / value / index (Trident-safe). |
@@ -240,8 +242,9 @@ On locked-down or offline machines you can run without a global `pip install`. D
 pip install --target ../.pydeps "selenium>=4.14.0,<5"
 ```
 
-By default the server looks for `../.pydeps` relative to the repository directory, so the MCP protocol
-itself has **zero** pip dependencies (newline-delimited JSON-RPC 2.0 is implemented inline).
+Only `IE_PYDEPS` adds a folder to the import path; the server no longer looks for `../.pydeps` on its
+own. The MCP protocol itself has **zero** pip dependencies (newline-delimited JSON-RPC 2.0 is
+implemented inline).
 
 ---
 
@@ -340,9 +343,11 @@ IE_SESSION_ID = "qa-agent-country"
 
 ### Choosing interaction mode (LLM guidance)
 
-LLM agents should choose `background` when the MCP runs on a person's active desktop. It avoids
-forcing the IE-mode Edge window to the foreground and uses synthetic events instead of physical
-mouse/keyboard input. Prefer it for navigation, page inspection, ordinary clicks, and form entry:
+`background` is the default, and the right choice when the MCP runs on a person's active desktop.
+It sends native input as window messages (IEDriver `native_events` on) without requiring window
+focus, so the IE-mode Edge window is not forced to the foreground and your physical mouse is left
+alone. (Synthetic, non-native events were tried and did nothing on the development machine.)
+Prefer it for navigation, page inspection, ordinary clicks, and form entry:
 
 ```toml
 [mcp_servers.ie-mcp.env]
@@ -351,7 +356,7 @@ IE_INTERACTION_MODE = "background"
 
 Use `native` only as a compatibility fallback after a required interaction fails in background
 mode—for example, a legacy control, hover menu, file upload, OS modal, or ActiveX component. Native
-mode uses focused OS input and may take over the user's mouse:
+mode requires window focus, so it takes focus and can mix with the user's own keystrokes and mouse:
 
 ```toml
 [mcp_servers.ie-mcp.env]
@@ -362,6 +367,16 @@ The mode is fixed for the lifetime of the MCP process, so restart the MCP after 
 mode is headless: Edge still creates a visible IE-mode window. When multiple native-mode agents run
 on the same Windows desktop, their focus-sensitive interactions can still conflict. The server also
 returns this selection guidance in its MCP `initialize` response so clients can present it to LLMs.
+
+### Other things the server does to the driver
+
+- IEDriverServer is started without the inherited `__COMPAT_LAYER` environment variable (the Claude
+  desktop app sets one; with it Edge relaunches itself and IEDriver never finds the IE window).
+  Your own environment is not changed.
+- IEDriver's `unhandledPromptBehavior` is `ignore`, so a driver command no longer silently cancels
+  an open `alert`/`confirm`.
+- The HTTP client timeout to the driver is 300 seconds, so a dead driver cannot hang a tool call
+  forever.
 
 ### Tests
 

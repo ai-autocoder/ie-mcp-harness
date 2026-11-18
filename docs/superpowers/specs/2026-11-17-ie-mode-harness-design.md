@@ -79,7 +79,7 @@ changing how the page behaves**.
 | Conditional request headers stripped (pages re-fetched instead of served from cache) | `IE_CAPTURE_NO_CACHE=1` (off by default) | `IE_CAPTURE_NO_CACHE=0` |
 | Wrappers around `onerror`, `alert`/`confirm`/`prompt`, `showModalDialog`, `open` (and `console`, native `XMLHttpRequest` as above) | Instrumentation active | `IE_INSTRUMENT=0` |
 | Proxy in the request path. It may move intranet hosts that normally bypass a proxy into another IE security zone, which can change Protected Mode, automatic logon and Compatibility View (and with it the document mode) | `IE_CAPTURE=1` | `IE_CAPTURE=0`, or list those hosts in `IE_CAPTURE_BYPASS` |
-| IEDriver synthetic (non-native) input | `IE_INTERACTION_MODE=background` (the default) | `IE_INTERACTION_MODE=native` (takes focus and the mouse) |
+| IEDriver native input without window focus (`native_events=True`, `require_window_focus=False`: window messages, no focus, no physical mouse; synthetic events did nothing on the development machine, spike D17) | `IE_INTERACTION_MODE=background` (the default) | `IE_INTERACTION_MODE=native` (takes focus; can mix with the user's keystrokes and mouse) |
 | A complete no-op `console` created where the page has none | `IE_CONSOLE_STUB=1` (off by default) | `IE_CONSOLE_STUB=0` |
 | Async (script) clicks: not user-initiated, no mousedown/mouseup/focus, may be blocked by the pop-up blocker | `mode="async"` or `IE_CLICK_MODE=async` | `mode="driver"` |
 | COM input on dialogs and attached tabs: synthetic event sequence or posted key messages | `target="hwnd:…"`/`"tab:…"` | use the driver path when it works |

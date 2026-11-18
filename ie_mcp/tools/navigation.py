@@ -9,7 +9,9 @@ from ie_mcp.session import SESSION, log
 @tool(
     "ie_open",
     "Start (or reuse) an Edge IE-mode session and navigate to a URL "
-    "(default IE_DEFAULT_URL). Keeps the session alive for later calls.",
+    "(default IE_DEFAULT_URL). Keeps the session alive for later calls. An http(s) URL is "
+    "required in IE mode: about:blank renders in Chromium and IEDriver cannot find an IE "
+    "window, so a new session opened on it fails.",
     {
         "type": "object",
         "properties": {

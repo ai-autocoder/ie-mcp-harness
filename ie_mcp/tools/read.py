@@ -1,8 +1,10 @@
 """Tools that read the page: text, html, element values, frames, grids, screenshots, waits."""
 import json
+import re
 import time
+from pathlib import PureWindowsPath
 
-from ie_mcp import js
+from ie_mcp import config, js
 from ie_mcp.protocol import image_result, text_result, tool
 from ie_mcp.session import SESSION, log
 
@@ -37,9 +39,13 @@ def t_text(args):
     from selenium.webdriver.common.by import By
     d = SESSION.ensure()
     SESSION._apply_frame(args.get("frame"))
-    txt = d.find_element(By.TAG_NAME, "body").text
+    try:
+        txt = d.find_element(By.TAG_NAME, "body").text
+    except Exception:
+        # Selenium's text atom fails on Trident; plain innerText still works.
+        txt = d.execute_script("return document.body.innerText")
     limit = args.get("limit", 8000)
-    return text_result(txt[:limit])
+    return text_result(("" if txt is None else str(txt))[:limit])
 
 
 @tool(
@@ -105,34 +111,18 @@ def t_get(args):
     {"type": "object", "properties": {}},
 )
 def t_frames(args):
-    from selenium.webdriver.common.by import By
     d = SESSION.ensure()
     d.switch_to.default_content()
-    n = len(d.find_elements(By.TAG_NAME, "frame") + d.find_elements(By.TAG_NAME, "iframe"))
+    # frames.js reads name/id/src from the frame elements of the top document (Selenium's
+    # get_attribute atom fails on Trident) and returns a delimited string.
+    raw = d.execute_script(js.load("frames.js"))
     out = []
-    # The legacy Trident engine throws on get_attribute()/Sizzle, so probe each
-    # frame by switching into it (by index) and reading what survives.
-    for i in range(n):
-        d.switch_to.default_content()
-        info = {"index": i}
-        try:
-            d.switch_to.frame(i)
-            try:
-                info["url"] = d.execute_script("return document.location.href")
-            except Exception:
-                info["url"] = None
-            try:
-                info["title"] = d.title
-            except Exception:
-                pass
-            try:
-                info["text_preview"] = d.find_element(By.TAG_NAME, "body").text[:120]
-            except Exception:
-                info["text_preview"] = None
-        except Exception as exc:
-            info["error"] = str(exc).splitlines()[0]
-        out.append(info)
-    d.switch_to.default_content()
+    for record in (raw or "").split("\x1e"):
+        if record == "":
+            continue
+        fields = record.split("\x1f") + [""] * 4
+        out.append({"index": int(fields[0]), "name": fields[1], "id": fields[2],
+                    "src": fields[3]})
     return text_result(json.dumps(out, indent=2))
 
 
@@ -185,14 +175,45 @@ def t_grid(args):
         ensure_ascii=False, indent=2)[: args.get("out_limit", 12000)])
 
 
+# Windows opens these names as devices whatever the extension ("nul.png" is NUL).
+# The superscript digits (COM¹ ...) are reserved too.
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+                   *(f"{base}{digit}" for base in ("COM", "LPT") for digit in "123456789¹²³")}
+_FORBIDDEN_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _screenshot_target(name):
+    """Where a screenshot named ``name`` is saved: ``<session dir>/screenshots/<name>``.
+
+    Only a bare file name is accepted: no drive (``C:x.png`` is drive-relative), no root,
+    no directory separators, no ``..``, no ``:`` (NTFS alternate data streams), no wildcard
+    characters, no device names. The folder is created here and this server never deletes
+    it (screenshots saved by name are kept after ie_close).
+    """
+    text = "" if name is None else str(name)
+    parsed = PureWindowsPath(text)
+    stem = text.split(".")[0].strip().upper()
+    # Windows strips trailing dots and spaces ("shot." would be saved as "shot").
+    if (text.strip(". ") == "" or text != text.strip() or text.endswith(".")
+            or parsed.drive or parsed.root or len(parsed.parts) != 1
+            or _FORBIDDEN_NAME_CHARS.search(text) or stem in _RESERVED_NAMES):
+        raise ValueError(
+            f"save_path {text!r} must be a bare file name (no folders, drive or ..); "
+            "it is saved in the session's screenshots folder")
+    folder = config.SETTINGS.session_paths.directory / "screenshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / text
+
+
 @tool(
     "ie_screenshot",
     "Capture a PNG screenshot of the IE-mode window, or of a single element if "
-    "by/value are given (returned as an image; optionally saved to save_path).",
+    "by/value are given (returned as an image). save_path, a bare file name, also saves it "
+    "in the session's screenshots folder; saved files are kept after ie_close.",
     {
         "type": "object",
         "properties": {
-            "save_path": {"type": "string"},
+            "save_path": {"type": "string", "description": "bare file name, e.g. shot.png; omit it to not save (an empty string is an error)"},
             "no_inline": {"type": "boolean", "description": "return confirmation text instead of the image blob"},
             "by": {"type": "string", "description": "element locator type (for element screenshot)"},
             "value": {"type": "string", "description": "element locator value (for element screenshot)"},
@@ -201,6 +222,8 @@ def t_grid(args):
     },
 )
 def t_screenshot(args):
+    # Validate before touching the browser: a bad name must fail without side effects.
+    target = _screenshot_target(args["save_path"]) if "save_path" in args else None
     d = SESSION.ensure()
     if args.get("value"):
         # element-scoped screenshot
@@ -215,14 +238,14 @@ def t_screenshot(args):
         log("screenshot: capturing")
         png = d.get_screenshot_as_png()
     log(f"screenshot: got {len(png)} bytes")
-    if args.get("save_path"):
-        with open(args["save_path"], "wb") as fh:
+    if target is not None:
+        with open(target, "wb") as fh:
             fh.write(png)
-        log(f"screenshot: saved {args['save_path']}")
+        log(f"screenshot: saved {target}")
     if args.get("no_inline"):
         # avoid returning a giant base64 blob; just confirm + path
         return text_result(f"screenshot saved ({len(png)} bytes)"
-                           + (f" -> {args['save_path']}" if args.get("save_path") else ""))
+                           + (f" -> {target}" if target is not None else ""))
     return image_result(png)
 
 

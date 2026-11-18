@@ -61,7 +61,7 @@ The spec's "Fidelity" table is the list. Add a row whenever you add a modificati
 |---|---|
 | OS | Windows 10/11 with an unlocked, interactive desktop (IE mode is never headless) |
 | Edge | Microsoft Edge with IE mode available |
-| IEDriverServer | Official Selenium IE driver, **32-bit (Win32) 4.14.0** recommended. Set `IE_DRIVER_PATH`. Automatic discovery in the per-user Selenium cache arrives in plan Task 4; until then upstream hardcodes a path that will not exist on your machine |
+| IEDriverServer | Official Selenium IE driver, **32-bit (Win32) 4.14.0** recommended. Set `IE_DRIVER_PATH`, or leave it unset: the server then uses the highest version in the per-user Selenium cache (`~/.cache/selenium/IEDriverServer/win32/<version>/`, then `win64`) and tells you to set `IE_DRIVER_PATH` if it finds none |
 | Python | **3.10+** (current selenium requires it; the development machine runs 3.14). |
 | Runtime deps | `selenium>=4.14.0,<5` only. Optional extra `.[win32]` adds `pywin32>=306` (COM backend); the server runs without it |
 
@@ -96,8 +96,9 @@ python scripts/run_integration.py it_modal   # one module
 # serve the fixture site by hand; prints both origins (--host, --port, --alt-port)
 python -m ie_mcp_fixtures
 
-# check the setup end to end. Until plan Task 4 the selftest clears your IE-mode cookies and
-# cache (upstream forces ensure_clean_session); the plan avoids running it before then.
+# check the setup end to end: opens and closes one real IE-mode session on IE_DEFAULT_URL
+# (which must be an http(s) URL). It does not clear your cookies or cache unless you set
+# IE_CLEAN_SESSION=1.
 ie-mcp --selftest            # needs `pip install -e .`; or: python -m ie_mcp --selftest
 
 # register a dev copy with Claude Code for manual testing
@@ -177,6 +178,14 @@ the upstream code behaves as before:
 - **Network capture** comes from a streaming local recording proxy that only the IE-mode
   browser process uses. It is verified on the first http(s) navigation and reported as
   unverified or off otherwise.
+- **Settings and tool guards (plan Task 4, done).** Interaction mode defaults to `background`
+  (native input, no window focus). `IE_CLEAN_SESSION` is opt-in. `IE_PYDEPS` is the only way a
+  path is added to `sys.path` (there is no implicit `../.pydeps`). `IE_DRIVER_PATH` unset means
+  discovery in the per-user Selenium cache (`config.discover_driver_path`, win32 first). `ie_upload`
+  works only with `IE_UPLOAD_DIR` set and only on files that `Path.resolve()` places inside it.
+  `ie_screenshot` `save_path` is a bare file name saved in `<session dir>/screenshots/` and kept.
+  `ie_text` falls back to `document.body.innerText`; `ie_frames` reads `name`/`id`/`src` with
+  `js/frames.js`. `ie_open` needs an http(s) URL in IE mode.
 
 ## Trident rules for injected JavaScript
 
@@ -244,17 +253,22 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 - "Unable to get browser" is often transient while a page or frame navigates; retry.
 - Re-apply the frame path on every call; frames reload and references go stale.
 - IEDriver's default `unhandledPromptBehavior` is "dismiss and notify": any driver command
-  silently cancels an open alert/confirm. Plan Task 4 sets `ignore`.
+  silently cancels an open alert/confirm. `session.build_options` sets `ignore`.
 - A WebDriver click whose handler opens `alert`/`confirm`/`showModalDialog` can block until the
   dialog closes. (On the development machine, Edge 146 + IEDriver 4.14, the spike saw it return
   at once with the dialog open; keep the watchdog anyway.)
 - Synthetic input (`native_events=False`) did nothing on the development machine: `click`
   raises `ElementNotInteractableException` or silently no-ops and `send_keys` leaves the field
   empty. Native events with `require_window_focus=False` worked there while another window had
-  focus (spike D17, one machine; about 1 click in 6 was lost, so check a click's effect).
+  focus (spike D17, one machine; about 1 click in 6 was lost, so check a click's effect). So
+  `IE_INTERACTION_MODE=background` (the default) is `native_events=True`,
+  `require_window_focus=False`: native input sent as window messages without taking focus or the
+  user's mouse. `native` (`require_window_focus=True`) is the fallback; it takes focus and can mix
+  with the user's own keystrokes and mouse.
 - An inherited `__COMPAT_LAYER` environment variable (the Claude desktop app sets one) makes
   Edge relaunch itself, so IEDriver cannot find the IE window. Start IEDriver with that variable
-  removed from its environment (spike D16). Do not use `ie.ignoreprocessmatch`.
+  removed from its environment (spike D16; `session.driver_environment`, passed as the
+  `Service` `env`). Do not use `ie.ignoreprocessmatch`.
 - With `--ie-mode-force`, `about:blank` renders in Chromium and IEDriver finds no IE window:
   always start a session on an http(s) URL.
 - Session creation sometimes hangs inside IEDriver after Edge starts; bound it and retry.
@@ -276,13 +290,16 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
   string; selenium's `Proxy` class converts strings, but raw capability dicts do not. Without
   `use_per_process_proxy=True`, IEDriver writes the user's global WinINet proxy settings; never
   build a proxy capability without it.
-- Selenium's HTTP client to the driver has no timeout by default. Set one (plan Task 4), or a
-  dead driver hangs the calling thread forever.
+- Selenium's HTTP client to the driver must have a finite timeout, or a dead driver hangs the
+  calling thread forever. `webdriver.Ie` builds its own `ClientConfig(timeout=120)` and takes no
+  `client_config`, so `session.apply_driver_timeout` raises it to `DRIVER_HTTP_TIMEOUT` (300 s)
+  on the created driver through `command_executor.client_config` (selenium 4.52;
+  `RemoteConnection.set_timeout` is deprecated there). Session creation runs under the 120 s.
 - If the per-process proxy hook fails, IEDriver only logs "Proxy will not be set!"; the session
   must verify that the proxy saw traffic.
 - `ensure_clean_session=True` clears the user's whole IE-mode cookie store and cache, not only
-  the session's. Upstream forces it on (`ie_mcp/session.py`, `IeSession._build`); plan Task 4 makes it
-  opt-in (`IE_CLEAN_SESSION=1`).
+  the session's. Upstream forced it on; it is opt-in (`IE_CLEAN_SESSION=1`) and `build_options`
+  takes it from `settings.clean_session`.
 - With default Internet Options IE maps `127.0.0.1` to the Internet zone (Protected Mode on)
   and the dotless `localhost` to the Local intranet zone (Protected Mode off, intranet
   Compatibility View possible). The fixture's two origins therefore sit on opposite sides of

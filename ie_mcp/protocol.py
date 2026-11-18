@@ -16,12 +16,14 @@ PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "ie-mcp", "version": "0.1.0"}
 SERVER_INSTRUCTIONS = (
     "IE interaction mode is selected when this MCP process starts. "
-    "Use IE_INTERACTION_MODE=background when automation runs on a user's active desktop: "
-    "it uses synthetic events and does not force browser focus. Prefer it for navigation, "
-    "reading, form entry, and ordinary clicks. If a legacy control, hover, upload, modal, or "
-    "ActiveX interaction fails in background mode, restart this MCP with "
-    "IE_INTERACTION_MODE=native as the compatibility fallback; native mode may take focus and "
-    "interfere with the user's mouse. IE mode is not headless in either mode."
+    "IE_INTERACTION_MODE=background is the default and suits automation on a user's active "
+    "desktop: input is native (window messages) but does not take browser focus or move the "
+    "user's mouse. Prefer it for navigation, reading, form entry, and ordinary clicks. If a "
+    "legacy control, hover, upload, modal, or ActiveX interaction fails in background mode, "
+    "restart this MCP with IE_INTERACTION_MODE=native as the compatibility fallback; native "
+    "mode takes window focus and can mix with the user's own keystrokes and mouse. "
+    "IE mode is never headless: a visible Edge window is always opened. "
+    "ie_open needs an http(s) URL."
 )
 
 

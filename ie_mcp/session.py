@@ -326,6 +326,86 @@ def cleanup_stale_sessions(session_root, browser_rows=None, pid_alive=None, kill
     }
 
 
+# --- IEDriver options, environment and HTTP timeout ---------------------------
+# Seconds the Selenium HTTP client waits for IEDriver to answer one command. Without a
+# finite value a dead driver hangs the calling thread (selenium's own default depends on
+# the version). Long waits (ie_wait_ready) poll in short commands, so 300 is ample.
+DRIVER_HTTP_TIMEOUT = 300
+
+
+def build_options(settings, initial_url, proxy_port=None, bypass=None):
+    """The IeOptions for a new session. Pure: no process is started."""
+    from selenium import webdriver
+
+    options = webdriver.IeOptions()
+    options.attach_to_edge_chrome = True
+    options.edge_executable_path = settings.edge_path
+    options.ignore_zoom_level = True
+    options.ignore_protected_mode_settings = True
+    options.require_window_focus = settings.interaction_mode.require_window_focus
+    # ensure_clean_session clears the user's whole IE-mode cookie store and cache, not just
+    # this session's, so it is opt-in (IE_CLEAN_SESSION=1). Upstream forced it on.
+    options.ensure_clean_session = settings.clean_session
+    options.native_events = settings.interaction_mode.native_events
+    # IEDriver's default ("dismiss and notify") silently cancels an open alert/confirm on any
+    # driver command; "ignore" leaves script dialogs alone for the dialog tools.
+    options.unhandled_prompt_behavior = "ignore"
+    options.browser_attach_timeout = 30_000
+    options.page_load_strategy = "none"
+    # CRITICAL for IE mode: navigate during session creation so IEDriver
+    # crosses the Protected-Mode boundary and reconnects to the new browser
+    # process *before* handing back control. Navigating afterwards makes the
+    # driver lose (and exit on) the browser.
+    if initial_url:
+        options.initial_browser_url = initial_url
+    if proxy_port is not None:
+        from selenium.webdriver.common.proxy import Proxy
+
+        address = f"127.0.0.1:{int(proxy_port)}"
+        proxy = Proxy()
+        proxy.http_proxy = address
+        proxy.ssl_proxy = address
+        # Quirk: IEDriver rejects a string here (selenium's Proxy converts strings, a raw
+        # capability dict does not), so noProxy is a list. "<-loopback>" makes loopback
+        # addresses go through the proxy too (IE bypasses it for them otherwise).
+        proxy.no_proxy = ["<-loopback>"] + list(bypass or [])
+        options.proxy = proxy
+        # Quirk: without this IEDriver writes the user's global WinINet proxy settings.
+        options.use_per_process_proxy = True
+    return options
+
+
+def driver_environment(environ=None):
+    """A copy of the environment for IEDriverServer, without ``__COMPAT_LAYER``.
+
+    Quirk (spike D16): the Claude desktop app sets ``__COMPAT_LAYER`` (for example
+    ``DetectorsAppHealth``). Inherited, it makes Edge relaunch itself, so IEDriver never
+    finds the IE window it started. The key is dropped case-insensitively (Windows
+    environment names are case-insensitive). ``ie.ignoreprocessmatch`` is not a fix: it
+    hides the symptom. Never mutates ``os.environ``.
+    """
+    source = os.environ if environ is None else environ
+    return {k: v for k, v in source.items() if k.upper() != "__COMPAT_LAYER"}
+
+
+def apply_driver_timeout(driver, seconds=DRIVER_HTTP_TIMEOUT):
+    """Set the HTTP client timeout of a created driver.
+
+    Checked against selenium 4.52.0 (the installed version): ``webdriver.Ie`` builds its own
+    ``ClientConfig(timeout=120)`` and takes no ``client_config`` argument, so the timeout is
+    raised on the live connection through the public ``command_executor.client_config``.
+    ``RemoteConnection.set_timeout`` is deprecated there and class-wide. Selenium releases
+    before ClientConfig (we support >= 4.14) only have ``set_timeout``, used as the fallback.
+    Session creation itself runs under the 120 s default, which is already finite.
+    """
+    executor = driver.command_executor
+    client_config = getattr(executor, "client_config", None)
+    if client_config is not None:
+        client_config.timeout = seconds
+    else:
+        type(executor).set_timeout(seconds)
+
+
 # --- the IE driver wrapper ---------------------------------------------------
 class IeSession:
     def __init__(self):
@@ -334,30 +414,23 @@ class IeSession:
         self.edge_pid = None      # the IE-mode msedge.exe window PID we own
         self.profile = None       # IEDriver-<uuid> temp profile that identifies us
 
-    def _build(self, initial_url):
+    def _build(self, initial_url, settings=None):
         from selenium import webdriver
         from selenium.webdriver.ie.service import Service
 
-        settings = config.SETTINGS
-        options = webdriver.IeOptions()
-        options.attach_to_edge_chrome = True
-        options.edge_executable_path = settings.edge_path
-        options.ignore_zoom_level = True
-        options.ignore_protected_mode_settings = True
-        options.require_window_focus = settings.interaction_mode.require_window_focus
-        options.ensure_clean_session = True
-        options.native_events = settings.interaction_mode.native_events
-        options.browser_attach_timeout = 30_000
-        options.page_load_strategy = "none"
-        # CRITICAL for IE mode: navigate during session creation so IEDriver
-        # crosses the Protected-Mode boundary and reconnects to the new browser
-        # process *before* handing back control. Navigating afterwards makes the
-        # driver lose (and exit on) the browser.
-        if initial_url:
-            options.initial_browser_url = initial_url
-
-        service = Service(executable_path=settings.driver_path)
-        return webdriver.Ie(service=service, options=options)
+        settings = config.SETTINGS if settings is None else settings
+        driver_path = settings.driver_path
+        if not driver_path:
+            raise FileNotFoundError(
+                "IEDriverServer.exe not found in the per-user Selenium cache "
+                "(~/.cache/selenium/IEDriverServer). Set IE_DRIVER_PATH to its full path.")
+        if not os.path.isfile(driver_path):
+            raise FileNotFoundError(f"IE_DRIVER_PATH does not point to a file: {driver_path}")
+        options = build_options(settings, initial_url)
+        service = Service(executable_path=driver_path, env=driver_environment())
+        driver = webdriver.Ie(service=service, options=options)
+        apply_driver_timeout(driver, DRIVER_HTTP_TIMEOUT)
+        return driver
 
     def ensure(self, initial_url=None):
         """Return a live driver, (re)creating it with retries if needed.
