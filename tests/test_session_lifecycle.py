@@ -103,6 +103,8 @@ class LifecycleTestCase(unittest.TestCase):
             mock.patch.object(session, "process_identity",
                               side_effect=lambda pid: ("fake.exe", int(pid))),
             mock.patch.object(session, "RETRY_DELAY", 0),
+            # No scan of the real desktop for the main window in these tests.
+            mock.patch.object(IeSession, "_ie_tops", return_value={}),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

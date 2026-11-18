@@ -19,6 +19,7 @@ from typing import Callable, Optional
 
 from ie_mcp import config
 from ie_mcp.session import DRIVER_LOCK, log
+from ie_mcp.win32 import htmldoc, windows
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "ie-mcp", "version": "0.1.0"}
@@ -163,8 +164,9 @@ def call_budget(spec, args):
 # --- hooks ---------------------------------------------------------------------
 # Windows that block the page (script alert, modal HTML dialog, ...) as dicts with "kind",
 # "title" and "hwnd". Win32-only, no COM, so it is safe to call from any thread. Replaced by
-# the window tools.
-MODAL_PROBE: Callable[[], list] = lambda: []
+# the window tools. The real probe lists the session's visible dialog windows; replace it in
+# tests.
+MODAL_PROBE: Callable[[], list] = windows.modal_probe
 
 # fn(spec, args, result): run after a successful driver tool, in one sub-thread, while the
 # driver lock is still held, unless a modal is open or the call deferred its effect
@@ -179,6 +181,24 @@ AFTER_CALL: list = []
 # in, enters all of them for itself and around everything it does (COM apartments: no COM
 # object may outlive, or be used from outside, the thread that obtained it).
 CALL_CONTEXTS: list = []
+
+
+def _register_com_context():
+    """Append ``htmldoc.com_apartment`` to ``CALL_CONTEXTS`` when pywin32 imports.
+
+    Without pywin32 the server still starts (window tools and the probe are ctypes only) and
+    the COM backend reports the missing extra when it is used. Returns whether it registered.
+    """
+    try:
+        import pythoncom  # noqa: F401
+    except Exception:  # ImportError, or a broken pywin32 install: either way no COM
+        return False
+    if htmldoc.com_apartment not in CALL_CONTEXTS:
+        CALL_CONTEXTS.append(htmldoc.com_apartment)
+    return True
+
+
+_register_com_context()
 
 POST_HOOK_WAIT = 3.0   # seconds the worker waits for the POST_HOOKS thread
 AFTER_CALL_WAIT = 2.0  # seconds the worker waits for each AFTER_CALL thread

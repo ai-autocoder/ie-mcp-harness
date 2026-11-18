@@ -113,9 +113,9 @@ asserts it, and `ie_browsers` shows what is running.
 ## Architecture
 
 Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the package below.
-Modules the later tasks add (`backends.py`, `png.py`, the rest of `win32/`, `capture/`, further
-`tools/` modules and `js/` scripts) are listed here as the target; `win32/processes.py` exists
-(Task 5: `process_identity` only, ctypes, no pywin32). Keep this section in sync with the
+Modules the later tasks add (`backends.py`, `png.py`, `win32/capture.py`, `capture/`, further
+`tools/` modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
+`win32/windows.py` and `win32/htmldoc.py` exist (Task 7). Keep this section in sync with the
 plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
@@ -133,9 +133,10 @@ ie_mcp/
   backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); resolve_backend
   png.py             encode_png (stdlib zlib)
   win32/
-    processes.py     process_identity (image + creation time), Toolhelp32 snapshot, process tree
-    windows.py       window enumeration and classification, modal_probe, ie_mode_tabs
-    htmldoc.py       com_apartment, com_call (retries rejected calls), ie_server_child, document_from_hwnd (pywin32)
+    processes.py     process_identity (image + creation time), snapshot (2 s cache; fresh=True skips it), process_tree
+    windows.py       ctypes only: enumerate_windows, classify, modal_probe (visible windows only, no COM), session_window_pids,
+                     ATTACHED_TOPS, pick_main_hwnd (ie_mode_tabs comes with Task 15)
+    htmldoc.py       com_apartment, com_call (retries rejected calls), ie_server_child, document_from_hwnd, document_url (pywin32, lazy)
     capture.py       PrintWindow capture, DPI awareness
   capture/
     store.py         NetworkEntry, CaptureStore
@@ -322,6 +323,11 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
   (`DirectUIHWND` child only): its text is not readable through child windows, but
   `WM_COMMAND` 1/2 answers it. The alert's OK button has control ID 2. A `prompt` has an `Edit`
   child (spike Q8/D14).
+- `windows.modal_probe` reports only *visible* windows (Task 7 ruling): Edge processes may own
+  hidden `#32770` windows (assumed, not measured), which would otherwise put a false NOTICE on
+  every tool result.
+- `processes.snapshot()` is cached for 2 s. A before/after comparison (the `main_hwnd` capture
+  around driver creation) must call it with `fresh=True`.
 - The fixture's page without a doctype (`quirks.htm`) runs in documentMode 11 with
   `compatMode == "BackCompat"`, not in mode 5 (spike Q6).
 - Pass the `proxy` capability's `noProxy` as a **list** (`["<-loopback>"]`). IEDriver rejects a

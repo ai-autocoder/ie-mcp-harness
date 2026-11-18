@@ -589,6 +589,9 @@ class IeSession:
         self.driver = None
         self.driver_pid = None    # IEDriverServer.exe PID
         self.edge_pid = None      # the IE-mode msedge.exe window PID we own
+        # Top-level hwnd of the session's first IE window (what ``windows.classify`` calls
+        # "main"). None when unknown; reset whenever the browser is torn down.
+        self.main_hwnd = None
         self.profile = None       # IEDriver-<uuid> temp profile that identifies us
         # (image name, creation time) of the two processes above. A PID alone proves nothing
         # once Windows reuses it, so every kill compares these first.
@@ -718,10 +721,12 @@ class IeSession:
             try:
                 log(f"creating IE-mode session (attempt {attempt}/{retries}) url={initial_url}")
                 before = _edge_profiles()
+                before_tops = self._ie_tops()
                 self.driver = self._build(initial_url, before_profiles=before)
                 # Record the identities first: if a later step fails, the teardown below
                 # can still kill exactly this browser.
                 self._capture_identity(before)
+                self._record_main_hwnd(before_tops)
                 # Force-closed while the browser was being created: do not hand it out. The
                 # except block below kills it (its identities were just recorded).
                 self.check_cancel()
@@ -736,6 +741,46 @@ class IeSession:
                 if attempt < retries:
                     self.pause(RETRY_DELAY)
         raise RuntimeError(f"could not start Edge IE mode after {retries} tries: {last}")
+
+    def _ie_tops(self, edge_tree_of=None):
+        """{hwnd: title} of the top windows with an IE server window inside, or None.
+
+        Only Edge's processes are scanned (``edge_tree_of``: only that process and its
+        children). It never raises: a failure here must not break session creation, it only
+        leaves ``main_hwnd`` unknown. The process snapshot is read fresh because a before/after
+        pair must not share the 2 s cache.
+        """
+        try:
+            from ie_mcp.win32 import processes, windows
+            rows = processes.snapshot(fresh=True)
+            if edge_tree_of:
+                pids = processes.process_tree(edge_tree_of, rows)
+            else:
+                pids = {r.pid for r in rows if r.exe.lower() == "msedge.exe"}
+            return windows.ie_top_windows(pids)
+        except Exception as exc:
+            log(f"could not list IE windows: {exc}")
+            return None
+
+    def _record_main_hwnd(self, before_tops):
+        """Set ``main_hwnd`` to the IE window that appeared while the driver started."""
+        self.main_hwnd = None
+        if before_tops is None:
+            return
+        if not self.edge_pid:
+            # Edge adoption failed. Without our own process tree the scan would cover every
+            # Edge window, and a window the user opened meanwhile could be taken for ours.
+            log("session main window unknown: our Edge process was not identified")
+            return
+        try:
+            from ie_mcp.win32 import windows
+            after = self._ie_tops(self.edge_pid)
+            if after is not None:
+                self.main_hwnd = windows.pick_main_hwnd(
+                    set(before_tops), after, lambda: self.driver.title)
+        except Exception as exc:
+            log(f"could not tell the main IE window: {exc}")
+        log(f"session main window: hwnd={self.main_hwnd}")
 
     def _capture_identity(self, before_profiles):
         """Record which browser we just opened (driver pid + the new IE-mode edge)."""
@@ -810,6 +855,7 @@ class IeSession:
     def quit_browser(self):
         """Quit the driver and kill our own Edge, but keep the lease (and the identity)."""
         driver, self.driver = self.driver, None
+        self.main_hwnd = None
         self._quit_driver(driver, QUIT_TIMEOUT)
         # IEDriver often leaves the IE-mode Edge window alive: kill ours, if still ours.
         self._forget_processes(self.kill_own_processes())
@@ -823,6 +869,7 @@ class IeSession:
         self.cancel.set()
         killed = self.kill_own_processes()
         self.driver = None
+        self.main_hwnd = None
         self._forget_processes(killed)
         return killed
 
@@ -835,6 +882,7 @@ class IeSession:
         """
         self.cancel.set()
         driver, self.driver = self.driver, None
+        self.main_hwnd = None
         self._quit_driver(driver, timeout_s)
         survivors = self._forget_processes(self.kill_own_processes())
         if not survivors:

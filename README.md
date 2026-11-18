@@ -303,7 +303,13 @@ Running straight from the clone without installing also works — `python -m ie_
 - `ie_mcp/config.py` — `Settings`: every env var, read once (`config.SETTINGS`).
 - `ie_mcp/session.py` — the IEDriver wrapper (`IeSession`), session leases, process
   tracking, identity-checked killing (`kill_verified`) and orphan cleanup.
-- `ie_mcp/win32/processes.py` — `process_identity` (image name + creation time, ctypes).
+- `ie_mcp/win32/processes.py` — `process_identity` (image name + creation time), the process
+  snapshot and process tree (ctypes; trees are for listing, never for killing).
+- `ie_mcp/win32/windows.py` — window enumeration and classification (main, popup, HTML dialog,
+  script dialog, system dialog) and the modal probe behind the `NOTICE:`/`BLOCKED:` answers
+  (ctypes only, no COM).
+- `ie_mcp/win32/htmldoc.py` — COM access to an IE document through `WM_HTML_GETOBJECT`
+  (needs the optional `pywin32` extra; the server runs without it).
 - `ie_mcp/protocol.py` — the stdio JSON-RPC loop and the `@tool` registry.
 - `ie_mcp/tools/` — one `t_*` function per tool, grouped in `navigation.py`, `read.py`,
   `interact.py`, `dialogs.py` and `diagnostics.py`.
