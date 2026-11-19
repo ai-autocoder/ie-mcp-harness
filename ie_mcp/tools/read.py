@@ -1,0 +1,653 @@
+"""Tools that read the page: text, html, element values, frames, grids, screenshots, waits."""
+import json
+import re
+from pathlib import PureWindowsPath
+
+from ie_mcp import backends, config, js, png
+from ie_mcp.backends import TARGET_SCHEMA, resolve_backend, uses_driver
+from ie_mcp.protocol import image_result, locator_budget, text_result, tool, wait_budget
+from ie_mcp.session import SESSION, Cancelled, log
+from ie_mcp.tools.windows import parse_hwnd
+from ie_mcp.win32 import capture, messages, windows
+
+# Defaults of the wait tools; each watchdog budget is computed from the same values.
+WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL = 45, 2
+WAIT_READY_TIMEOUT, WAIT_READY_INTERVAL = 60, 2
+WAIT_ELEMENT_TIMEOUT, WAIT_ELEMENT_INTERVAL = 20, 1
+
+
+def _parse_ready(raw):
+    """Parse the \x1f-delimited readiness string into a dict."""
+    parts = (raw or "").split("\x1f")
+    parts += [""] * (6 - len(parts))
+    to_int = lambda v: int(v) if str(v).isdigit() else 0
+    return {
+        "ready": parts[0] == "true",
+        "len": to_int(parts[1]),
+        "els": to_int(parts[2]),
+        "docs": to_int(parts[3]),
+        "crossOrigin": to_int(parts[4]),
+        "sample": parts[5],
+    }
+
+
+@tool(
+    "ie_text",
+    "Get visible text of the page or of a specific frame.",
+    {
+        "type": "object",
+        "properties": {
+            "frame": {"type": ["string", "integer"], "description": "frame index or name (optional)"},
+            "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
+        },
+    },
+    needs_driver=uses_driver,
+)
+def t_text(args):
+    txt = resolve_backend(args.get("target")).text(args.get("frame"))
+    return text_result(txt[:args.get("limit", 8000)])
+
+
+@tool(
+    "ie_html",
+    "Get the HTML source of the page or of a specific frame. Over COM (target hwnd:/tab:) it is "
+    "the document's outerHTML (no doctype, markup as the engine normalised it), not the "
+    "original source the driver returns.",
+    {
+        "type": "object",
+        "properties": {
+            "frame": {"type": ["string", "integer"]},
+            "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
+        },
+    },
+    needs_driver=uses_driver,
+)
+def t_html(args):
+    html = resolve_backend(args.get("target")).html(args.get("frame"))
+    return text_result(html[:args.get("limit", 12000)])
+
+
+@tool(
+    "ie_get",
+    "Read an element's text (default), its 'value', or a named attribute/property. "
+    "Set attr=text|value|<attribute name>.",
+    {
+        "type": "object",
+        "properties": {
+            "by": {"type": "string"},
+            "value": {"type": "string"},
+            "attr": {"type": "string", "description": "text (default) | value | any attribute name"},
+            "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+            "limit": {"type": "integer"},
+            "target": TARGET_SCHEMA,
+        },
+        "required": ["by", "value"],
+    },
+    budget=locator_budget(),
+    needs_driver=uses_driver,
+)
+def t_get(args):
+    """Read an element's text, value, or a named attribute via direct JS (see the backends)."""
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    el = backend.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+    out = backend.get(el, args.get("attr", "text"))
+    return text_result(out[: args.get("limit", 4000)])
+
+
+@tool(
+    "ie_frames",
+    "List the frames/iframes of the current page (index, name, id, src). "
+    "Use the index or name with the 'frame' arg of other tools.",
+    {"type": "object", "properties": {"target": TARGET_SCHEMA}},
+    needs_driver=uses_driver,
+)
+def t_frames(args):
+    return text_result(json.dumps(resolve_backend(args.get("target")).frames(), indent=2))
+
+
+@tool(
+    "ie_grid",
+    "Extract a tabular grid as structured rows. Auto-picks the table with the "
+    "most multi-cell rows (or pass table_id). Returns headers + rows (header-keyed "
+    "dicts when the header row is detected/given). App-agnostic.",
+    {
+        "type": "object",
+        "properties": {
+            "frame": {"type": ["string", "integer"], "description": "frame/path holding the grid (e.g. '3/0')"},
+            "table_id": {"type": "string", "description": "specific table element id (optional)"},
+            "headers": {"type": "array", "items": {"type": "string"}, "description": "explicit column names (optional)"},
+            "limit": {"type": "integer", "description": "max rows (default 500)"},
+            "out_limit": {"type": "integer", "description": "max output chars (default 12000)"},
+            "target": TARGET_SCHEMA,
+        },
+    },
+    needs_driver=uses_driver,
+)
+def t_grid(args):
+    """Extract a tabular grid as structured rows (header-keyed dicts when possible).
+
+    Heuristic + app-agnostic: picks the table with the most multi-cell rows. Pass a
+    table element id via `table_id` to target a specific grid. Returns headers + rows;
+    if `headers` is given (or detected) and matches the column count, rows become dicts.
+    """
+    grid = resolve_backend(args.get("target")).grid(
+        args.get("frame"), args.get("table_id"), args.get("headers"), args.get("limit", 500))
+    if "note" in grid:
+        return text_result(json.dumps(grid))
+    return text_result(json.dumps(grid, ensure_ascii=False, indent=2)[: args.get("out_limit", 12000)])
+
+
+# Windows opens these names as devices whatever the extension ("nul.png" is NUL).
+# The superscript digits (COM¹ ...) are reserved too.
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+                   *(f"{base}{digit}" for base in ("COM", "LPT") for digit in "123456789¹²³")}
+_FORBIDDEN_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _screenshot_target(name):
+    """Where a screenshot named ``name`` is saved: ``<session dir>/screenshots/<name>``.
+
+    Only a bare file name is accepted: no drive (``C:x.png`` is drive-relative), no root,
+    no directory separators, no ``..``, no ``:`` (NTFS alternate data streams), no wildcard
+    characters, no device names. The folder is created here and this server never deletes
+    it (screenshots saved by name are kept after ie_close).
+    """
+    text = "" if name is None else str(name)
+    parsed = PureWindowsPath(text)
+    stem = text.split(".")[0].strip().upper()
+    # Windows strips trailing dots and spaces ("shot." would be saved as "shot").
+    if (text.strip(". ") == "" or text != text.strip() or text.endswith(".")
+            or parsed.drive or parsed.root or len(parsed.parts) != 1
+            or _FORBIDDEN_NAME_CHARS.search(text) or stem in _RESERVED_NAMES):
+        raise ValueError(
+            f"save_path {text!r} must be a bare file name (no folders, drive or ..); "
+            "it is saved in the session's screenshots folder")
+    folder = config.SETTINGS.session_paths.directory / "screenshots"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / text
+
+
+SCREENSHOT_SCOPES = ("page", "element", "window")
+# Kinds a window screenshot may capture. A system dialog is never captured (CLAUDE.md safety
+# rules: it can show credentials or file paths); "other" windows are neither pages nor dialogs.
+CAPTURE_KINDS = ("main", "popup", "html_dialog", "script_dialog")
+DIALOG_KINDS = ("html_dialog", "script_dialog")
+
+
+def _screenshot_scope(args):
+    """The scope of an ``ie_screenshot`` call; ValueError for a contradictory request.
+
+    Default: ``window`` when a ``target`` is given, else ``element`` when ``value`` is given
+    (upstream's behaviour), else ``page``. Nothing here touches the browser.
+    """
+    scope = args.get("scope")
+    has_target = args.get("target") not in (None, "")
+    has_locator = bool(args.get("by") or args.get("value"))
+    if scope is None:
+        scope = "window" if has_target else ("element" if has_locator else "page")
+    if scope not in SCREENSHOT_SCOPES:
+        raise ValueError(f"scope must be one of {', '.join(SCREENSHOT_SCOPES)}, not {scope!r}")
+    if has_target and scope != "window":
+        raise ValueError("target only applies to scope=window")
+    if scope == "element" and not (args.get("by") and args.get("value")):
+        raise ValueError("scope=element needs by and value")
+    if scope != "element" and has_locator:
+        raise ValueError(f"by/value only apply to scope=element, not scope={scope}")
+    return scope
+
+
+def _screenshot_needs_driver(args):
+    """Page and element shots drive the browser; window shots (and bad requests) do not."""
+    try:
+        return _screenshot_scope(args) != "window"
+    except ValueError:
+        return False
+
+
+def _numbered_name(name, number):
+    """The save_path of image ``number`` (1-based): the given name, then ``<stem>-<n><suffix>``."""
+    if number == 1:
+        return name
+    path = PureWindowsPath(name)
+    return f"{path.stem}-{number}{path.suffix}"
+
+
+def _describe(hwnd, kind, cls, title):
+    shown = (title[:60] + "...") if len(title) > 60 else title
+    return f"hwnd:{hwnd} {kind} class={cls} title={shown!r}"
+
+
+def _live_tops(pids):
+    """The session's main window and attached top windows that still belong to it.
+
+    ``SESSION.main_hwnd`` is recorded once and can outlive the browser (Edge killed from
+    outside), and Windows recycles hwnd numbers: a stale value could name an unrelated
+    window, which must never be captured. A top counts only while it is a window and, for the
+    main window, its process is one of the session's (attached tops are the ones the attach
+    tools recorded in ``ATTACHED_TOPS``).
+    """
+    attached = {h for h in windows.ATTACHED_TOPS if messages.is_window(h)}
+    main = SESSION.main_hwnd
+    if main is not None and messages.is_window(main) and windows.window_pid(main) in pids:
+        attached.add(main)
+    return attached
+
+
+def _main_capture_window(pids, tops):
+    """The window a window screenshot starts with (an hwnd), or a RuntimeError.
+
+    ``SESSION.main_hwnd``; while ``backends.DEFAULT_TARGET`` is an attached ``tab:<n>``, that
+    tab's top-level browser window (``GetAncestor``) instead, because the session's own main
+    window is then not the page being worked on. Either must still be a live session window.
+    """
+    number = backends.default_tab_hwnd()
+    if number is not None:
+        top = windows.root_window(number)
+        if not top or top not in tops or top not in windows.ATTACHED_TOPS:
+            raise RuntimeError(f"the attached tab {number} is gone: call ie_tabs and ie_attach again")
+        return top
+    if SESSION.main_hwnd is None:
+        raise RuntimeError("no session window: call ie_open first")
+    if SESSION.main_hwnd not in tops:
+        raise RuntimeError("the session window is gone: call ie_close, then ie_open again")
+    return SESSION.main_hwnd
+
+
+def _plan_window_shots(target):
+    """``(shots, notes)``: windows to capture, bottom-most first, and windows only listed.
+
+    A shot is ``(hwnd, kind, cls, title)``. Only windows that ``enumerate_windows`` lists for
+    this session, or its main/attached top window, are ever planned; a system dialog never is.
+    """
+    pids = windows.session_window_pids()
+    infos = windows.enumerate_windows(pids, attached_tops=set(windows.ATTACHED_TOPS))
+    tops = _live_tops(pids)
+    by_hwnd = {w.hwnd: w for w in infos}
+
+    def shot_of(hwnd):
+        info = by_hwnd.get(hwnd)
+        if info is None:  # the main/attached top is not always in the listing
+            return (hwnd, "main", windows.class_name(hwnd), "")
+        return (hwnd, info.kind, info.cls, info.title)
+
+    if target not in (None, ""):
+        hwnd = parse_hwnd(target)  # only hwnd:<n>; anything else is refused here
+        info = by_hwnd.get(hwnd)
+        if info is not None and info.kind == "system_dialog":
+            raise ValueError(f"hwnd:{hwnd} is a system dialog: never captured; tell the user")
+        listed = info is not None and info.kind in CAPTURE_KINDS and (
+            info.visible or info.kind not in DIALOG_KINDS)
+        if not listed and hwnd not in tops:
+            raise ValueError(f"hwnd:{hwnd} is not a window of this session (see ie_windows)")
+        return [shot_of(hwnd)], []
+
+    main = _main_capture_window(pids, tops)
+    shots, notes = [shot_of(main)], []
+    # EnumWindows lists the top-most window first: reverse it, so the last image is frontmost.
+    for info in reversed(infos):
+        if info.hwnd != main and info.kind in DIALOG_KINDS and info.visible:
+            shots.append(shot_of(info.hwnd))
+    for info in infos:
+        if info.kind == "system_dialog" and info.visible:
+            notes.append(f"{_describe(info.hwnd, info.kind, info.cls, info.title)}: not captured "
+                         "(system dialogs are never captured; tell the user)")
+    return shots, notes
+
+
+def _window_screenshot(args):
+    """``ie_screenshot scope=window``: a text listing, then one PNG per captured window."""
+    name = args.get("save_path", "") if "save_path" in args else None
+    if "save_path" in args and not isinstance(name, str):
+        name = ""  # an explicit null is as wrong as an empty string: _screenshot_target refuses it
+    shots, notes = _plan_window_shots(args.get("target"))
+    live = []
+    for shot in shots:
+        if capture.is_minimized(shot[0]):  # never restored: that would move the user's windows
+            notes.append(f"{_describe(*shot)}: minimized, not captured")
+        else:
+            live.append(shot)
+    # Validate every file name before the first capture: a bad name fails without side effects.
+    paths = ([_screenshot_target(_numbered_name(name, k)) for k in range(1, len(live) + 1)]
+             if name is not None else [None] * len(live))
+    images, lines, failures = [], [], []
+    for shot, path in zip(live, paths):
+        try:
+            width, height, rgba = capture.capture_window(shot[0])
+            data = png.encode_png(width, height, rgba)
+        except Exception as exc:
+            failures.append(f"{_describe(*shot)}: capture failed: {exc}")
+            continue
+        images.append(data)
+        saved = ""
+        if path is not None:
+            # A write error is not a capture error: the image exists and is still returned.
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(data)
+                log(f"screenshot: saved {path}")
+                saved = f" -> {path}"
+            except OSError as exc:
+                failures.append(f"{_describe(*shot)}: could not save {path}: {exc}")
+        lines.append(f"image {len(images)}: {_describe(*shot)} {width}x{height}{saved}")
+    listing = "\n".join(
+        [f"{len(images)} window image(s), bottom-most window first; the last is frontmost"]
+        + lines + failures + notes)
+    if not images:
+        raise RuntimeError("no window could be captured\n" + listing)
+    log(f"screenshot: window scope, {len(images)} image(s)")
+    if args.get("no_inline"):
+        return text_result(listing)
+    return {"content": [{"type": "text", "text": listing}]
+            + [image_result(data)["content"][0] for data in images]}
+
+
+@tool(
+    "ie_screenshot",
+    "Capture PNG screenshots. scope=page (default) is the driver's view of the page; scope="
+    "element (by/value, the default when value is given) one element; scope=window renders the "
+    "session's windows as the user sees them with PrintWindow: first the main window (or the "
+    "attached tab's browser window), then every open modal HTML dialog and script alert/confirm/"
+    "prompt, bottom-most to top-most, one image each, plus a text item that lists them (a system "
+    "dialog is listed, never captured; a minimized window is reported, not restored). Window "
+    "shots need no driver, so they work while a dialog blocks the page; target=hwnd:<n> (from "
+    "ie_windows) captures that one window of this session only. A window IE paints itself can "
+    "come out blank: say so rather than guess. save_path, a bare file name, also saves it in "
+    "the session's screenshots folder (several images: name, name-2, name-3, ...); saved files "
+    "are kept after ie_close.",
+    {
+        "type": "object",
+        "properties": {
+            "scope": {"type": "string", "enum": ["page", "element", "window"],
+                      "description": "page, element or window (default: window with a target, "
+                                     "element with value, else page)"},
+            "target": {"type": "string",
+                       "description": "scope=window only: hwnd:<n>, one window of this session "
+                                      "(from ie_windows or a NOTICE); no other form is accepted"},
+            "save_path": {"type": "string", "description": "bare file name, e.g. shot.png; omit it to not save (an empty string is an error)"},
+            "no_inline": {"type": "boolean", "description": "return confirmation text instead of the image blob"},
+            "by": {"type": "string", "description": "element locator type (for element screenshot)"},
+            "value": {"type": "string", "description": "element locator value (for element screenshot)"},
+            "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
+        },
+    },
+    needs_driver=_screenshot_needs_driver,
+    budget=locator_budget(),
+)
+def t_screenshot(args):
+    # Validate before touching the browser: a bad request or name must fail without side effects.
+    scope = _screenshot_scope(args)
+    if scope == "window":
+        return _window_screenshot(args)
+    target = _screenshot_target(args["save_path"]) if "save_path" in args else None
+    d = SESSION.ensure()
+    if scope == "element":
+        el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
+        log("screenshot: capturing element")
+        png_bytes = el.screenshot_as_png
+    else:
+        try:
+            d.switch_to.default_content()  # window screenshots from the top doc
+        except Exception:
+            pass
+        log("screenshot: capturing")
+        png_bytes = d.get_screenshot_as_png()
+    log(f"screenshot: got {len(png_bytes)} bytes")
+    if target is not None:
+        with open(target, "wb") as fh:
+            fh.write(png_bytes)
+        log(f"screenshot: saved {target}")
+    if args.get("no_inline"):
+        # avoid returning a giant base64 blob; just confirm + path
+        return text_result(f"screenshot saved ({len(png_bytes)} bytes)"
+                           + (f" -> {target}" if target is not None else ""))
+    return image_result(png_bytes)
+
+
+@tool(
+    "ie_wait_text",
+    "Poll until a specific substring appears in the page text (for slow async "
+    "content). Scans all frames unless 'frame' is given; returns which frame "
+    "matched + a preview. For 'is the page loaded?' use ie_wait_ready instead.",
+    {
+        "type": "object",
+        "properties": {
+            "contains": {"type": "string"},
+            "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "max seconds (default 45)"},
+            "interval": {"type": "number", "description": "poll seconds (default 2)"},
+            "case_insensitive": {"type": "boolean"},
+            "gone": {"type": "boolean", "description": "wait for the substring to DISAPPEAR instead of appear (e.g. a spinner)"},
+            "target": TARGET_SCHEMA,
+        },
+        "required": ["contains"],
+    },
+    budget=wait_budget(WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL),
+    needs_driver=uses_driver,
+)
+def t_wait_text(args):
+    """Poll until `contains` appears (or, with gone=True, disappears) in a frame.
+
+    If no frame is given, all frames are scanned each round. With gone=False the
+    success condition is the substring present in some frame; with gone=True it is
+    the substring absent from every scanned frame (e.g. a spinner disappearing).
+    """
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    needle = args["contains"]
+    ci = args.get("case_insensitive", True)
+    if ci:
+        needle = needle.lower()
+    timeout = args.get("timeout", WAIT_TEXT_TIMEOUT)
+    interval = args.get("interval", WAIT_TEXT_INTERVAL)
+    frame = args.get("frame")
+    gone = args.get("gone", False)
+
+    elapsed = 0
+    last = ""
+    while True:
+        SESSION.check_cancel()  # outside the try below: not a transient failure
+        # A whole round can fail transiently while the app navigates (IEDriver briefly reports
+        # "Unable to get browser"; over COM there may be no document yet): treat that as "not yet".
+        found_in = None
+        matched = False  # found_in is None for a page without frames, so it cannot say "found"
+        round_ok = False
+        try:
+            backend.refresh()  # re-read the document before every poll (a navigation may have replaced it)
+            if frame is not None and frame != "":
+                candidates = [frame]
+            else:
+                n = len(backend.frames())
+                candidates = list(range(n)) if n else [None]
+            readable = 0
+            read_error = None
+            for cand in candidates:
+                try:
+                    txt = backend.text(cand)
+                except Cancelled:
+                    raise
+                except Exception as exc:
+                    # Kept for the report: no document, a frame that cannot be read, ...
+                    read_error = (str(exc).splitlines() or [repr(exc)])[0]
+                    continue
+                readable += 1
+                hay = txt.lower() if ci else txt
+                if needle in hay:
+                    found_in = cand
+                    matched = True
+                    last = txt
+                    break
+                last = txt
+            # A round where no frame could be read says nothing about the text: not "gone".
+            round_ok = readable > 0
+            if not round_ok:
+                last = f"(transient: {read_error or 'no frame could be read'})"
+        except Cancelled:
+            raise
+        except Exception as exc:
+            last = f"(transient: {(str(exc).splitlines() or [repr(exc)])[0]})"
+
+        if round_ok:
+            if not gone and matched:
+                backend.reset_frame()
+                return text_result(json.dumps({
+                    "ok": True, "found": True, "frame": found_in,
+                    "after_seconds": elapsed, "preview": last[:600],
+                }, indent=2))
+            if gone and not matched:
+                backend.reset_frame()
+                return text_result(json.dumps({
+                    "ok": True, "gone": True, "after_seconds": elapsed,
+                }, indent=2))
+        if elapsed >= timeout:
+            backend.reset_frame()
+            return text_result(json.dumps({
+                "ok": False, "found": matched, "after_seconds": elapsed,
+                "timed_out": True, "last_preview": last[:600],
+            }, indent=2))
+        SESSION.pause(interval)
+        elapsed += interval
+
+
+@tool(
+    "ie_wait_ready",
+    "Wait until the page finishes loading: every same-origin frame's "
+    "document.readyState is 'complete' AND the DOM stops changing for a few "
+    "polls (content settled). Handles slow async/frameset content. Use THIS to "
+    "know content is ready, then search the data separately. Do NOT wait for a "
+    "specific value to detect load — if it's absent you can't tell 'still "
+    "loading' from 'not present'. Returns loaded=true/false with frame count, "
+    "text length, element count and a content sample.",
+    {
+        "type": "object",
+        "properties": {
+            "timeout": {"type": "number", "description": "max seconds (default 60)"},
+            "interval": {"type": "number", "description": "poll seconds (default 2)"},
+            "stable_rounds": {"type": "integer", "description": "consecutive unchanged polls to call it settled (default 2)"},
+            "min_chars": {"type": "integer", "description": "minimum visible text length to count as loaded (default 1)"},
+            "settle": {"type": "boolean", "description": "require DOM to stop changing (default true); set false to only require readyState complete"},
+        },
+    },
+    budget=wait_budget(WAIT_READY_TIMEOUT, WAIT_READY_INTERVAL),
+)
+def t_wait_ready(args):
+    """Wait until the page (and all same-origin frames) finish loading — app-agnostic.
+
+    "Loaded" = every document.readyState is 'complete' AND the DOM has stopped
+    changing for `stable_rounds` consecutive polls (content settled), with at least
+    `min_chars` of visible text. This handles slow async/AJAX/frameset content
+    (e.g. ~30s grids) without knowing anything about the specific application.
+    """
+    d = SESSION.ensure()
+    timeout = args.get("timeout", WAIT_READY_TIMEOUT)
+    interval = args.get("interval", WAIT_READY_INTERVAL)
+    stable_rounds = args.get("stable_rounds", 2)
+    min_chars = args.get("min_chars", 1)
+    require_settle = args.get("settle", True)
+
+    elapsed = 0
+    prev_sig = None
+    stable = 0
+    last = {"loaded": False, "stage": "init"}
+    while True:
+        SESSION.check_cancel()
+        try:
+            d.switch_to.default_content()
+            raw = d.execute_script(js.load("ready_probe.js"))
+            s = _parse_ready(raw)
+            sig = (s.get("len", 0), s.get("els", 0), s.get("docs", 0))
+            ready = bool(s.get("ready")) and s.get("len", 0) >= min_chars
+            if prev_sig is not None and sig == prev_sig:
+                stable += 1
+            else:
+                stable = 0
+            prev_sig = sig
+            settled = (not require_settle) or (stable >= stable_rounds)
+            last = {
+                "loaded": bool(ready and settled),
+                "stage": "ready" if (ready and settled) else ("settling" if ready else "loading"),
+                "readyState_all_complete": bool(s.get("ready")),
+                "frames": s.get("docs", 0),
+                "cross_origin_frames": s.get("crossOrigin", 0),
+                "text_len": s.get("len", 0),
+                "elements": s.get("els", 0),
+                "stable_rounds": stable,
+                "sample": s.get("sample", ""),
+                "after_seconds": elapsed,
+            }
+            if last["loaded"]:
+                return text_result(json.dumps(last, indent=2))
+        except Exception as exc:
+            stable = 0
+            last = {"loaded": False, "stage": "transient",
+                    "note": str(exc).splitlines()[0], "after_seconds": elapsed}
+        if elapsed >= timeout:
+            last["timed_out"] = True
+            return text_result(json.dumps(last, indent=2))
+        SESSION.pause(interval)
+        elapsed += interval
+
+
+@tool(
+    "ie_wait_element",
+    "Wait for an element (by/value) to appear — or, with gone=true, to disappear. "
+    "Use before acting on slow-rendering content.",
+    {
+        "type": "object",
+        "properties": {
+            "by": {"type": "string"},
+            "value": {"type": "string"},
+            "frame": {"type": ["string", "integer"]},
+            "timeout": {"type": "number", "description": "max seconds (default 20)"},
+            "interval": {"type": "number"},
+            "gone": {"type": "boolean", "description": "wait for it to disappear instead"},
+            "target": TARGET_SCHEMA,
+        },
+        "required": ["by", "value"],
+    },
+    budget=wait_budget(WAIT_ELEMENT_TIMEOUT, WAIT_ELEMENT_INTERVAL),
+    needs_driver=uses_driver,
+)
+def t_wait_element(args):
+    """Wait for an element (by/value) to appear — or, with gone=True, to disappear."""
+    by = args["by"]
+    value = args["value"]
+    frame = args.get("frame")
+    timeout = args.get("timeout", WAIT_ELEMENT_TIMEOUT)
+    interval = args.get("interval", WAIT_ELEMENT_INTERVAL)
+    gone = args.get("gone", False)
+    backend = resolve_backend(args.get("target"))
+    backend.ensure()
+    elapsed = 0
+    while True:
+        SESSION.check_cancel()
+        present = False
+        last_error = None
+        try:
+            backend.refresh()  # re-read the document before every poll
+            backend.find(by, value, frame, 0)
+            present = True
+        except (Cancelled, ValueError):
+            raise  # a usage error (xpath over COM, css below documentMode 8) never gets better
+        except Exception as exc:
+            present = False
+            # Not found is the normal "not yet"; anything else (no document, a frame that
+            # cannot be read) is kept so a timeout can say why.
+            if not isinstance(exc, LookupError):
+                last_error = (str(exc).splitlines() or [repr(exc)])[0]
+        if (not gone and present) or (gone and not present and last_error is None):
+            backend.reset_frame()
+            return text_result(json.dumps({
+                "ok": True, "present": present, "after_seconds": elapsed,
+            }))
+        if elapsed >= timeout:
+            report = {"ok": False, "present": present, "after_seconds": elapsed, "timed_out": True}
+            if last_error:
+                report["last_error"] = last_error
+            return text_result(json.dumps(report))
+        SESSION.pause(interval)
+        elapsed += interval

@@ -1,0 +1,20 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<title>Fixture script errors</title>
+<script type="text/javascript">
+window.onload = function () {
+  if (window.console) { console.log('fixture-log'); }
+  undefinedFunctionCall();
+};
+function lateError() {
+  throw new Error('late-error');
+}
+</script>
+</head>
+<body>
+<h3>Script errors</h3>
+<p>On load this page logs <code>fixture-log</code> and then calls an undefined function.</p>
+<input type="button" id="late_error" name="late_error" value="Throw" onclick="lateError()">
+</body>
+</html>

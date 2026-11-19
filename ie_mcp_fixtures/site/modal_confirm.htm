@@ -1,0 +1,24 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<title>Fixture confirm dialog</title>
+<base target="_self">
+<script type="text/javascript">
+function answer(value) {
+  window.returnValue = value;
+  window.close();
+}
+window.onload = function () {
+  var args = window.dialogArguments;
+  var text = (args && args.question) ? args.question : '';
+  var el = document.getElementById('question');
+  if (typeof el.innerText != 'undefined') { el.innerText = text; } else { el.textContent = text; }
+};
+</script>
+</head>
+<body>
+<p id="question"></p>
+<input type="button" id="yes" name="yes" value="Yes" onclick="answer('yes')">
+<input type="button" id="no" name="no" value="No" onclick="answer('no')">
+</body>
+</html>

@@ -15,6 +15,9 @@ env/
 # ie-mcp runtime artifacts
 *.log
 ie_mcp.lock
+captures/
+*.jsonl
+screenshots/
 
 # Editor / OS
 .vscode/

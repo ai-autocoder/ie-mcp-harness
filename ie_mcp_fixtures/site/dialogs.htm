@@ -1,0 +1,25 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<title>Fixture dialogs</title>
+<script type="text/javascript">
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (typeof el.innerText != 'undefined') { el.innerText = text; } else { el.textContent = text; }
+}
+function doAlert() { alert('Hello alert'); }
+function doConfirm() { setText('confirm_result', String(confirm('Confirm?'))); }
+function doPrompt() { setText('prompt_result', String(prompt('Your name?', 'default'))); }
+function doPopup() { window.open('popup.htm', 'pop', 'width=320,height=200'); }
+</script>
+</head>
+<body>
+<h3>Dialogs</h3>
+<p><input type="button" id="do_alert" name="do_alert" value="Alert" onclick="doAlert()"></p>
+<p><input type="button" id="do_confirm" name="do_confirm" value="Confirm" onclick="doConfirm()">
+Result: <span id="confirm_result"></span></p>
+<p><input type="button" id="do_prompt" name="do_prompt" value="Prompt" onclick="doPrompt()">
+Result: <span id="prompt_result"></span></p>
+<p><input type="button" id="do_popup" name="do_popup" value="Popup" onclick="doPopup()"></p>
+</body>
+</html>

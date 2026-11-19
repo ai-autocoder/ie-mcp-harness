@@ -1,0 +1,3 @@
+# Fixture pages are served byte for byte: line endings change byte offsets that
+# the charset prescan and the proxy's injection tests depend on. Never convert them.
+ie_mcp_fixtures/site/** -text

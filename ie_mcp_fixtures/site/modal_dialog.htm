@@ -1,0 +1,138 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head><title>Fixture lookup dialog</title><meta http-equiv="X-UA-Compatible" content="IE=7">
+<base target="_self">
+<script type="text/javascript">
+var args = window.dialogArguments;
+
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (typeof el.innerText != 'undefined') { el.innerText = text; } else { el.textContent = text; }
+}
+
+function loadXml(q) {
+  var x = new ActiveXObject('Microsoft.XMLHTTP');
+  x.open('GET', '/api/lookup.xml?q=' + encodeURIComponent(q), false);
+  x.send(null);
+  var doc = x.responseXML;
+  if (!doc || !doc.documentElement) {
+    // MSXML leaves responseXML empty when it does not recognise the content
+    // type; parse the text instead.
+    doc = new ActiveXObject('Microsoft.XMLDOM');
+    doc.async = false;
+    doc.loadXML(x.responseText);
+  }
+  return doc;
+}
+
+function pick(code, name) {
+  if (args) {
+    args.sCode = code;
+    args.sName = name;
+  }
+  window.close();
+}
+
+function makePicker(code, name) {
+  return function () { pick(code, name); return false; };
+}
+
+// Rebuilds the rows below the header; returns the number of rows.
+function buildGrid(q) {
+  var items = loadXml(q).getElementsByTagName('item');
+  var table = document.getElementById('lookup_grid');
+  while (table.rows.length > 1) {
+    table.deleteRow(1);
+  }
+  for (var i = 0; i < items.length; i++) {
+    var code = items[i].getAttribute('code');
+    var name = items[i].getAttribute('name');
+    var row = table.insertRow(-1);
+    var cell = row.insertCell(-1);
+    var link = document.createElement('a');
+    link.id = 'pick_' + code;
+    link.href = '#';
+    link.onclick = makePicker(code, name);
+    link.appendChild(document.createTextNode(code));
+    cell.appendChild(link);
+    row.insertCell(-1).appendChild(document.createTextNode(name));
+  }
+  return items.length;
+}
+
+function keyCodeOf(e) {
+  e = e || window.event;
+  return e.keyCode || e.which || 0;
+}
+
+function onSearchKey(e) {
+  if (keyCodeOf(e) != 13) {
+    return true;
+  }
+  var n = buildGrid(document.getElementById('search').value);
+  setText('search_count', String(n));
+  return false;
+}
+
+// The count and characters live in variables: reading them back through
+// innerText could collapse whitespace. resetTyped() starts over.
+var typedCount = 0;
+var typedChars = '';
+function resetTyped() {
+  typedCount = 0;
+  typedChars = '';
+  setText('keypress_count', '0');
+  setText('typed_chars', '');
+}
+function onTypedKey(e) {
+  var code = keyCodeOf(e);
+  typedCount = typedCount + 1;
+  typedChars = typedChars + String.fromCharCode(code);
+  setText('keypress_count', String(typedCount));
+  setText('typed_chars', typedChars);
+  return true;
+}
+
+function openNested() {
+  var r = window.showModalDialog('modal_nested.htm', null, 'dialogWidth:300px;dialogHeight:200px');
+  setText('nested_result', (r === undefined || r === null) ? '' : String(r));
+}
+
+function dialogAlert() {
+  alert('Dialog alert');
+  setText('dialog_alert_result', 'alerted');
+}
+
+window.onload = function () {
+  setText('has_args', args ? 'yes' : 'no');
+  buildGrid('');
+};
+</script>
+</head>
+<body>
+<h3>Lookup</h3>
+<p>Dialog arguments: <span id="has_args"></span></p>
+<p>
+<label for="search">Search</label>
+<input type="text" id="search" name="search" onkeypress="return onSearchKey(event)">
+Rows: <span id="search_count"></span>
+</p>
+<table id="lookup_grid" border="1">
+<tr><th>Code</th><th>Name</th></tr>
+</table>
+<p>
+<input type="button" id="nested" name="nested" value="Nested..." onclick="openNested()">
+Nested result: <span id="nested_result"></span>
+</p>
+<p>
+<label for="typed">Typed</label>
+<input type="text" id="typed" name="typed" onkeypress="return onTypedKey(event)">
+Key presses: <span id="keypress_count">0</span>
+Characters: <span id="typed_chars"></span>
+</p>
+<p>
+<input type="button" id="dialog_alert" name="dialog_alert" value="Alert" onclick="dialogAlert()">
+<span id="dialog_alert_result"></span>
+</p>
+</body>
+</html>

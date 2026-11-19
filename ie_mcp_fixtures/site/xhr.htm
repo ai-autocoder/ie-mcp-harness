@@ -1,0 +1,64 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<title>Fixture XMLHTTP</title>
+<script type="text/javascript">
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (typeof el.innerText != 'undefined') { el.innerText = text; } else { el.textContent = text; }
+}
+
+function postPing(x) {
+  x.open('POST', '/echo', true);
+  // MSXML resets onreadystatechange on open(), so assign it afterwards.
+  x.onreadystatechange = function () {
+    if (x.readyState == 4) {
+      setText('xhr_result', String(x.responseText.length));
+    }
+  };
+  x.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  x.send('q=ping');
+}
+
+function makeXhr() {
+  var x = null;
+  // IE11 hides window.ActiveXObject from feature tests but still supports
+  // "new ActiveXObject", so try it directly.
+  try { x = new ActiveXObject('Microsoft.XMLHTTP'); } catch (e) { x = null; }
+  if (!x) { x = new XMLHttpRequest(); }
+  return x;
+}
+
+function doLoad() {
+  postPing(makeXhr());
+}
+
+function doLoadFragment() {
+  var x = makeXhr();
+  x.open('GET', '/fragment', true);
+  x.onreadystatechange = function () {
+    if (x.readyState == 4) {
+      setText('fragment_result', x.responseText);
+    }
+  };
+  x.send(null);
+}
+
+function doLoadNative() {
+  if (typeof XMLHttpRequest == 'undefined') {
+    setText('xhr_result', 'no XMLHttpRequest');
+    return;
+  }
+  postPing(new XMLHttpRequest());
+}
+</script>
+</head>
+<body>
+<h3>XMLHTTP</h3>
+<input type="button" id="load" name="load" value="Load (ActiveX)" onclick="doLoad()">
+<input type="button" id="load_native" name="load_native" value="Load (native)" onclick="doLoadNative()">
+<p>Result: <span id="xhr_result"></span></p>
+<input type="button" id="load_fragment" name="load_fragment" value="Load fragment" onclick="doLoadFragment()">
+<p>Fragment: <span id="fragment_result"></span></p>
+</body>
+</html>

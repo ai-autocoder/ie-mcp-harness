@@ -1,0 +1,327 @@
+"""Settings: every environment variable the server reads, parsed once.
+
+Code reads ``config.SETTINGS`` at call time (``from ie_mcp import config`` then
+``config.SETTINGS.x``), never ``from ie_mcp.config import SETTINGS``, so a test can
+replace it. Each later feature adds its env vars here.
+
+Configuration (all via env vars, all optional):
+  IE_EDGE_PATH      path to msedge.exe
+  IE_DRIVER_PATH    path to IEDriverServer.exe. Unset: the highest version in the per-user
+                    Selenium cache (~/.cache/selenium/IEDriverServer/win32, else win64)
+  IE_SITE_LIST      path to an Edge IE-mode site list XML. If set, the server
+                    verifies the HKCU Edge policy points at it (so listed sites
+                    render in IE mode). If unset, the server manages no policy
+                    and assumes Edge is already configured for IE mode.
+  IE_DEFAULT_URL    URL ie_open uses when none is given (default about:blank)
+  IE_ATTACH_RETRIES IEDriver attach attempts (default 3)
+  IE_PAGE_TIMEOUT   per-page load timeout in seconds (default 30)
+  IE_PYDEPS         extra sys.path dir for vendored selenium (unset: nothing is added)
+  IE_INTERACTION_MODE background (default: native input sent without taking window focus)
+                    or native (requires window focus; fallback)
+  IE_TOOL_TIMEOUT   per-tool-call budget in seconds (default 45). A call that needs the browser
+                    and takes longer is answered "BLOCKED:"; tools that wait declare a longer
+                    budget of their own (timeout + wait + margin)
+  IE_CLICK_MODE     driver (default: a WebDriver click) or async (a script click queued with
+                    setTimeout, which cannot block the driver). ie_click's mode argument
+                    overrides it per call
+  IE_CLEAN_SESSION  1/true/yes makes IEDriver clear the user's whole IE-mode cookie store
+                    and cache at session start and end (default off)
+  IE_UPLOAD_DIR     directory ie_upload may read from (unset: uploads are disabled)
+  IE_CAPTURE_REDACT 1 (default) redacts secrets in captured traffic, console records and the
+                    server log; 0/false/no/off turns redaction off
+  IE_CAPTURE_REDACT_FIELDS   extra field names to redact (comma-separated; added to the
+                    built-in list, matched case-insensitively)
+  IE_CAPTURE_REDACT_HEADERS  extra header names to redact (same format)
+  IE_CAPTURE_MAX_BODY  bytes kept of each captured request/response body (default 262144)
+  IE_CAPTURE_JSONL  1/true/yes also appends every captured exchange, after redaction, to a
+                    JSONL file (default off)
+  IE_INSTRUMENT     1 (default) lets the server wrap onerror, alert/confirm/prompt, showModalDialog,
+                    window.open (and console, native XMLHttpRequest where documented) in the pages
+                    it drives, to record errors, dialogs and console output; 0/false/no/off
+                    turns every page modification of that kind off
+  IE_CONSOLE_STUB   1/true/yes creates a complete no-op `console` where a page has none, so
+                    the page's console calls are recorded (default off: nothing is created)
+  IE_CAPTURE        1 (default) puts the IE-mode browser (only it, never the system) behind a local
+                    recording proxy on 127.0.0.1, which feeds ie_network/ie_request and inserts
+                    the instrumentation loader into HTML documents; 0/false/no/off turns it off
+  IE_CAPTURE_UPSTREAM_PROXY  host:port of a proxy the capture proxy forwards to (unset: direct)
+  IE_CAPTURE_BYPASS comma-separated host patterns that stay off the capture proxy (for hosts
+                    that must keep their normal proxy bypass and so their IE security zone)
+  IE_CAPTURE_NO_CACHE 1/true/yes strips conditional request headers so revalidations become
+                    full fetches the proxy can see (default off)
+  IE_KEEP_ARTIFACTS 1/true/yes keeps the JSONL capture file when the server exits (default:
+                    it is deleted; screenshots saved by name are always kept)
+  IE_SESSION_ID     logical agent/session name (default pid-<mcp process PID>)
+  IE_SESSION_ROOT   root for per-session logs, locks, and ownership records
+  IE_LOG_FILE       log file (default <session directory>/ie-mcp.log)
+  IE_LOCK_FILE      session lock file (default <session directory>/session.lock)
+  IE_NO_LOCK        1/true/yes disables the session lease (debugging only)
+"""
+import math
+import os
+import re
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
+
+from ie_mcp.capture.verify import parse_bypass, parse_upstream_proxy
+
+DEFAULT_EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+
+DRIVER_EXE = "IEDriverServer.exe"
+# Selenium Manager's per-user cache has one folder per architecture, then one per version.
+# 32-bit (win32) is searched first: it is the reference build for IE mode.
+DRIVER_ARCHITECTURES = ("win32", "win64")
+
+
+def _version_key(name):
+    """Sort key for a folder named like ``4.14.0``; non-numeric names sort lowest."""
+    parts = name.split(".")
+    # isascii: str.isdigit() is true for "²" etc., which int() rejects.
+    if all(part.isascii() and part.isdigit() for part in parts):
+        return (1, tuple(int(part) for part in parts))
+    return (0, ())
+
+
+def discover_driver_path(env: Mapping[str, str], home: Path) -> str | None:
+    """Find IEDriverServer.exe.
+
+    ``IE_DRIVER_PATH`` wins: it is returned if the file exists, else FileNotFoundError is
+    raised (a typo must not silently fall back to some other driver). Otherwise the highest
+    version in ``<home>/.cache/selenium/IEDriverServer/win32/<version>/``, then the same
+    under ``win64``; None when nothing is found.
+    """
+    explicit = env.get("IE_DRIVER_PATH")
+    if explicit:
+        if not os.path.isfile(explicit):
+            raise FileNotFoundError(f"IE_DRIVER_PATH does not point to a file: {explicit}")
+        return explicit
+    root = Path(home) / ".cache" / "selenium" / "IEDriverServer"
+    for architecture in DRIVER_ARCHITECTURES:
+        try:
+            candidates = [d for d in (root / architecture).iterdir()
+                          if (d / DRIVER_EXE).is_file()]
+        except OSError:
+            continue
+        if candidates:
+            best = max(candidates, key=lambda d: _version_key(d.name))
+            return str(best / DRIVER_EXE)
+    return None
+
+
+@dataclass(frozen=True)
+class InteractionMode:
+    name: str
+    require_window_focus: bool
+    native_events: bool
+
+
+def resolve_interaction_mode(env=None):
+    """Resolve the IEDriver input strategy from the process environment."""
+    env = os.environ if env is None else env
+    name = (env.get("IE_INTERACTION_MODE") or "background").strip().lower()
+    if name == "native":
+        return InteractionMode(name="native", require_window_focus=True, native_events=True)
+    if name == "background":
+        # Spike D17: synthetic events (native_events=False) did nothing on the development
+        # machine, so "background" is native input that does not require window focus.
+        return InteractionMode(name="background", require_window_focus=False, native_events=True)
+    raise ValueError("IE_INTERACTION_MODE must be native or background")
+
+
+# Spike D1: a WebDriver click never blocked the driver on a modal opener, in either interaction
+# mode, and synthetic input (upstream's old "background") clicked nothing, so "async" is
+# never the default. The table is per interaction mode so a later spike can change one.
+DEFAULT_CLICK_MODES = {"background": "driver", "native": "driver"}
+CLICK_MODES = ("driver", "async")
+
+DEFAULT_TOOL_TIMEOUT = 45.0
+DEFAULT_CAPTURE_MAX_BODY = 262144
+
+
+def resolve_click_mode(env, interaction_mode):
+    """``IE_CLICK_MODE`` (driver|async), else the default for the interaction mode."""
+    value = (env.get("IE_CLICK_MODE") or "").strip().lower()
+    if not value:
+        return DEFAULT_CLICK_MODES[interaction_mode.name]
+    if value not in CLICK_MODES:
+        raise ValueError("IE_CLICK_MODE must be driver or async")
+    return value
+
+
+def resolve_tool_timeout(env):
+    """``IE_TOOL_TIMEOUT`` in seconds: a finite number above zero (empty means unset)."""
+    value = (env.get("IE_TOOL_TIMEOUT") or "").strip()
+    if not value:
+        return DEFAULT_TOOL_TIMEOUT
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("IE_TOOL_TIMEOUT must be a number of seconds above zero")
+    return seconds
+
+
+@dataclass(frozen=True)
+class SessionPaths:
+    session_id: str
+    root: Path
+    directory: Path
+    log_file: Path
+    lock_file: Path
+    owner_file: Path
+
+
+def _safe_session_id(value):
+    session_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-.")
+    if not session_id:
+        raise ValueError("IE_SESSION_ID must contain at least one letter or number")
+    return session_id[:80]
+
+
+def build_session_paths(env=None, pid=None):
+    """Resolve all runtime artifacts beneath one MCP process's session directory."""
+    env = os.environ if env is None else env
+    pid = os.getpid() if pid is None else int(pid)
+    session_id = _safe_session_id(env.get("IE_SESSION_ID") or f"pid-{pid}")
+    root = Path(env.get("IE_SESSION_ROOT") or Path(tempfile.gettempdir()) / "ie-mcp" / "sessions")
+    directory = root / session_id
+    return SessionPaths(
+        session_id=session_id,
+        root=root,
+        directory=directory,
+        log_file=Path(env.get("IE_LOG_FILE") or directory / "ie-mcp.log"),
+        lock_file=Path(env.get("IE_LOCK_FILE") or directory / "session.lock"),
+        owner_file=directory / "owner.json",
+    )
+
+
+@dataclass(frozen=True)
+class Settings:
+    edge_path: str
+    # An explicit IE_DRIVER_PATH (not checked here) or the discovered driver; None if none found.
+    driver_path: str | None
+    site_list: str | None  # optional; no app-specific default
+    default_url: str
+    attach_retries: int
+    page_timeout: int
+    use_lock: bool
+    pydeps: Path | None  # only IE_PYDEPS adds a path; there is no implicit default
+    clean_session: bool  # opt-in: wipes the user's whole IE-mode cookie store and cache
+    upload_dir: Path | None  # None disables ie_upload
+    interaction_mode: InteractionMode
+    tool_timeout: float  # seconds; the minimum budget of every tool call
+    click_mode: str  # "driver" or "async": ie_click's default mode
+    session_paths: SessionPaths
+    capture_redact: bool = True
+    capture_redact_fields: frozenset[str] = frozenset()  # extra field names, lower case
+    capture_redact_headers: frozenset[str] = frozenset()  # extra header names, lower case
+    capture_max_body: int = DEFAULT_CAPTURE_MAX_BODY
+    capture_jsonl: bool = False
+    instrument: bool = True  # IE_INSTRUMENT: page wrappers, hooks and TaskDialog accept evidence
+    console_stub: bool = False  # IE_CONSOLE_STUB: create a no-op console where the page has none
+    capture: bool = True  # IE_CAPTURE: the recording proxy (spike D12 = no: on by default)
+    capture_upstream_proxy: tuple[str, int] | None = None  # IE_CAPTURE_UPSTREAM_PROXY
+    # Why IE_CAPTURE_UPSTREAM_PROXY could not be parsed. Not raised at load: the server must
+    # still start and list its tools (like a bad IE_DRIVER_PATH); the session start raises it.
+    capture_upstream_proxy_error: str | None = None
+    capture_bypass: tuple[str, ...] = ()  # IE_CAPTURE_BYPASS host patterns kept off the proxy
+    capture_no_cache: bool = False  # IE_CAPTURE_NO_CACHE
+    keep_artifacts: bool = False  # IE_KEEP_ARTIFACTS: keep the JSONL file on exit
+
+
+def _flag(env, name):
+    return env.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
+def _flag_default_on(env, name):
+    """A switch that is on unless explicitly turned off: a typo must not disable redaction."""
+    return env.get(name, "").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _name_set(env, name):
+    """Comma-separated names: stripped, lower-cased, empties dropped."""
+    return frozenset(part.strip().lower() for part in env.get(name, "").split(",")
+                     if part.strip())
+
+
+def resolve_capture_max_body(env):
+    """``IE_CAPTURE_MAX_BODY``: bytes kept per captured body, zero or more (empty means unset)."""
+    value = (env.get("IE_CAPTURE_MAX_BODY") or "").strip()
+    if not value:
+        return DEFAULT_CAPTURE_MAX_BODY
+    try:
+        size = int(value)
+    except ValueError:
+        size = -1
+    if size < 0:
+        raise ValueError("IE_CAPTURE_MAX_BODY must be a number of bytes, zero or more")
+    return size
+
+
+def _optional_path(env, name):
+    value = env.get(name, "").strip()
+    return Path(value) if value else None
+
+
+def _optional_absolute_path(env, name):
+    """Like _optional_path, but made absolute once, here: a relative directory would
+    otherwise follow the process's working directory, which can change between calls."""
+    path = _optional_path(env, name)
+    return path.resolve() if path else None
+
+
+def load_settings(env: Mapping[str, str], pid: int | None = None,
+                  home: Path | None = None) -> Settings:
+    """Parse every env var once. Raises ValueError on an invalid value, as upstream did at import.
+
+    An ``IE_DRIVER_PATH`` that does not exist is not an error here (the server must still
+    start and list its tools); the session reports it when it tries to launch the driver.
+    """
+    interaction_mode = resolve_interaction_mode(env)
+    upstream_proxy, upstream_proxy_error = None, None
+    try:
+        upstream_proxy = parse_upstream_proxy(env.get("IE_CAPTURE_UPSTREAM_PROXY"))
+    except ValueError as exc:
+        upstream_proxy_error = str(exc)
+    driver_path = env.get("IE_DRIVER_PATH") or discover_driver_path(
+        env, Path.home() if home is None else home)
+    return Settings(
+        edge_path=env.get("IE_EDGE_PATH", DEFAULT_EDGE_PATH),
+        driver_path=driver_path,
+        site_list=env.get("IE_SITE_LIST"),
+        default_url=env.get("IE_DEFAULT_URL", "about:blank"),
+        attach_retries=int(env.get("IE_ATTACH_RETRIES", "3")),
+        page_timeout=int(env.get("IE_PAGE_TIMEOUT", "30")),
+        use_lock=env.get("IE_NO_LOCK", "").lower() not in ("1", "true", "yes"),
+        pydeps=_optional_path(env, "IE_PYDEPS"),
+        clean_session=_flag(env, "IE_CLEAN_SESSION"),
+        upload_dir=_optional_absolute_path(env, "IE_UPLOAD_DIR"),
+        interaction_mode=interaction_mode,
+        tool_timeout=resolve_tool_timeout(env),
+        click_mode=resolve_click_mode(env, interaction_mode),
+        session_paths=build_session_paths(env, pid),
+        capture_redact=_flag_default_on(env, "IE_CAPTURE_REDACT"),
+        capture_redact_fields=_name_set(env, "IE_CAPTURE_REDACT_FIELDS"),
+        capture_redact_headers=_name_set(env, "IE_CAPTURE_REDACT_HEADERS"),
+        capture_max_body=resolve_capture_max_body(env),
+        capture_jsonl=_flag(env, "IE_CAPTURE_JSONL"),
+        instrument=_flag_default_on(env, "IE_INSTRUMENT"),
+        console_stub=_flag(env, "IE_CONSOLE_STUB"),
+        capture=_flag_default_on(env, "IE_CAPTURE"),
+        capture_upstream_proxy=upstream_proxy,
+        capture_upstream_proxy_error=upstream_proxy_error,
+        capture_bypass=parse_bypass(env.get("IE_CAPTURE_BYPASS")),
+        capture_no_cache=_flag(env, "IE_CAPTURE_NO_CACHE"),
+        keep_artifacts=_flag(env, "IE_KEEP_ARTIFACTS"),
+    )
+
+
+SETTINGS = load_settings(os.environ)
+
+# Make a vendored selenium importable regardless of how we are launched.
+if SETTINGS.pydeps and str(SETTINGS.pydeps) not in sys.path:
+    sys.path.insert(0, str(SETTINGS.pydeps))
