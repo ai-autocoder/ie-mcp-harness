@@ -574,8 +574,11 @@ Write a code comment for every new quirk you work around; they are rarely obviou
   recorded identity is never killed, and `taskkill` runs without `/T`. Process trees built
   from parent PIDs are fine for listing, never for killing.
 - Never click, accept or dismiss a **system dialog** (file open/save, print, security or
-  ActiveX prompts, credential prompts, "leave this page?"). Report it and let the user act.
-  Only script alerts the session can attribute to itself are handled.
+  ActiveX prompts, credential prompts). Report it and let the user act. Only script alerts
+  the session can attribute to itself are handled.
+- IE's **"leave this page?"** prompt (a page's `onbeforeunload`) is never accepted, because
+  leaving discards the page's unsaved input. It may be dismissed ("stay on this page"), which
+  changes nothing and keeps the agent from being stuck behind it.
 - No outbound network calls of the server's own. The proxy only forwards the browser's traffic
   (directly, or to `IE_CAPTURE_UPSTREAM_PROXY` when set).
 - Captured traffic and console records stay in memory. A JSONL copy is written only with
