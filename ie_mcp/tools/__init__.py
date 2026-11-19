@@ -10,4 +10,5 @@ from ie_mcp.tools import windows  # noqa: F401
 from ie_mcp.tools import dialogs  # noqa: F401
 from ie_mcp.tools import console  # noqa: F401
 from ie_mcp.tools import network  # noqa: F401
+from ie_mcp.tools import attach  # noqa: F401
 from ie_mcp.tools import diagnostics  # noqa: F401

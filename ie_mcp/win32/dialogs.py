@@ -76,9 +76,11 @@ def dialog_shape(children):
 
 
 def _owned_by_a_dialog_host(window):
-    """True when the immediate owner is a helper/dialog frame of the session's processes."""
+    """True when the immediate owner is a helper/dialog frame of the session's processes, or of
+    the process of an attached tab (``ie_attach`` records those; another live session's never)."""
     return (window.owner_cls in OWNER_CLASSES and window.owner_pid is not None
-            and window.owner_pid in windows.session_window_pids())
+            and (window.owner_pid in windows.session_window_pids()
+                 or window.owner_pid in windows.ATTACHED_PIDS))
 
 
 def confirm_script_dialog(hwnd, allow_prompt=False):

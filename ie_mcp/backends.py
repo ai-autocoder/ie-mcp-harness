@@ -23,7 +23,7 @@ from typing import Optional, Protocol
 
 from ie_mcp import js
 from ie_mcp.session import SESSION, log
-from ie_mcp.win32 import htmldoc, messages
+from ie_mcp.win32 import htmldoc, messages, windows
 
 IE_SERVER_CLASS = htmldoc.IE_SERVER_CLASS
 
@@ -84,6 +84,63 @@ def default_tab_hwnd():
     """The number of the attached tab that ``DEFAULT_TARGET`` names, or None (no tab default)."""
     kind, number = _parse_target(None)
     return number if kind == "tab" else None
+
+
+# --- the attached tab (state owner; ``ie_attach`` / ``ie_detach`` call these) ---------------
+# Held for every change of the attachment and by readers that check-then-act on it. The state
+# itself (DEFAULT_TARGET, ATTACHED_CHAINS, windows.ATTACHED_TOPS/PIDS) is rebound, never mutated,
+# because other threads read it without the lock.
+ATTACH_LOCK = threading.RLock()
+
+
+def attached_tab():
+    """The hwnd of the attached tab (``DEFAULT_TARGET`` is ``tab:<n>``), or None. Never raises."""
+    try:
+        return default_tab_hwnd()
+    except ValueError:
+        return None
+
+
+def attach_tab(tab):
+    """Make ``tab`` (a ``windows.TabInfo``) the attached tab, replacing any other in one swap.
+
+    ``DEFAULT_TARGET`` is set last and is never None in between: a concurrent driver tool is
+    refused throughout a re-attach.
+    """
+    global DEFAULT_TARGET, ATTACHED_CHAINS
+    with ATTACH_LOCK:
+        windows.ATTACHED_PIDS = frozenset({tab.pid})
+        windows.ATTACHED_TOPS = {tab.top_hwnd}
+        ATTACHED_CHAINS = {**ATTACHED_CHAINS, tab.hwnd: list(tab.ancestors)}
+        DEFAULT_TARGET = f"tab:{tab.hwnd}"
+        ATTACHED_CHAINS = {tab.hwnd: list(tab.ancestors)}
+
+
+def detach_tab():
+    """Clear the attachment (``DEFAULT_TARGET`` first); the number of the tab that was attached."""
+    global DEFAULT_TARGET, ATTACHED_CHAINS
+    with ATTACH_LOCK:
+        number = attached_tab()
+        DEFAULT_TARGET = None
+        windows.ATTACHED_TOPS = set()
+        windows.ATTACHED_PIDS = frozenset()
+        ATTACHED_CHAINS = {}
+        return number
+
+
+def prune_attached():
+    """Detach when the attached tab or its top window is gone; the tab number dropped, else None.
+
+    A dead top must not linger in ``ATTACHED_TOPS``: its handle could be reused by an unrelated
+    window, which would then count as part of the session.
+    """
+    with ATTACH_LOCK:
+        number = attached_tab()
+        if number is None:
+            return None
+        if messages.is_window(number) and all(messages.is_window(h) for h in windows.ATTACHED_TOPS):
+            return None
+        return detach_tab()
 
 
 def target_kind(target):

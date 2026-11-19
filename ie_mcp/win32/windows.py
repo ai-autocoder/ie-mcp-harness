@@ -21,9 +21,16 @@ MODAL_KINDS = ("html_dialog", "script_dialog", "system_dialog")
 GW_OWNER = 4
 GA_ROOT = 2
 
-# Top-level hwnds of attached tabs (plan Task 15 fills it). For an attached tab only windows
+# Top-level hwnds of attached tabs (``ie_attach`` fills it). For an attached tab only windows
 # whose owner chain reaches one of these count, never the rest of the user's Edge process tree.
+# Readers copy it (``set(ATTACHED_TOPS)``) while another thread may attach or detach, so a
+# writer must REBIND a new set (``windows.ATTACHED_TOPS = {...}``), never mutate this one.
 ATTACHED_TOPS: set = set()
+# The process that owns the attached tab's IE server window: the helper window that owns the
+# tab's script dialogs lives in it (see ``_attached_helpers`` and ``win32.dialogs``). Rebound
+# atomically, like ATTACHED_TOPS.
+ATTACHED_PIDS: frozenset = frozenset()
+EDGE_IMAGE = "msedge.exe"
 
 
 @dataclass
@@ -41,6 +48,17 @@ class WindowInfo:
     # not a top-level window). A script dialog is owned by the helper or dialog frame (D6/Q8).
     owner_cls: str = ""
     owner_pid: Optional[int] = None
+
+
+@dataclass
+class TabInfo:
+    """One IE-mode tab of a user's Edge window (see ``ie_mode_tabs``)."""
+    hwnd: int              # the Internet Explorer_Server window (D15: it survives navigation)
+    top_hwnd: int          # the browser window that holds it
+    ancestors: list        # hwnd's ancestors, nearest first, ending at top_hwnd
+    pid: int               # the process that owns the Internet Explorer_Server window
+    title: str
+    url: str = ""
 
 
 @dataclass
@@ -137,6 +155,24 @@ def root_window(hwnd):
     """
     u = _user32()
     return int(u.GetAncestor(hwnd, GA_ROOT) or 0) if u else 0
+
+
+def ancestor_chain(hwnd):
+    """``hwnd``'s parents, nearest first, ending at its top-level window ([] for a top window).
+
+    Read-only. ``GetParent`` on a child is its parent window (on a top-level window it would be
+    the owner, which is why the walk stops at the ``GA_ROOT`` window).
+    """
+    u = _user32()
+    if u is None:
+        return []
+    top, chain, current = root_window(hwnd), [], hwnd
+    while top and current != top and len(chain) < 64:
+        current = int(u.GetParent(current) or 0)
+        if not current:
+            break
+        chain.append(current)
+    return chain
 
 
 def _window_text(u, hwnd):
@@ -246,6 +282,66 @@ def session_windows(with_url=False):
                              attached_tops=set(ATTACHED_TOPS))
 
 
+def other_session_pids():
+    """PIDs of the process trees of the OTHER live ie-mcp sessions (from their owner records).
+
+    ``ie_mode_tabs`` must never offer their windows: a second agent's browser is not a tab
+    the user opened. Dead sessions are not excluded (nothing runs there).
+    """
+    from ie_mcp import config, session  # lazy: session imports this package
+    paths = config.SETTINGS.session_paths
+    roots = session.live_edge_roots(paths.root, paths.session_id)
+    rows = processes.snapshot()
+    pids = set()
+    for root in roots:
+        pids |= processes.process_tree(root, rows)
+    return pids
+
+
+def other_sessions_starting():
+    """How many other live ie-mcp sessions are starting a browser (see ``session.starting_sessions``)."""
+    from ie_mcp import config, session  # lazy: session imports this package
+    paths = config.SETTINGS.session_paths
+    return session.starting_sessions(paths.root, paths.session_id)
+
+
+def ie_mode_tabs(enum_fn=None):
+    """The IE-mode tabs of user-visible Edge windows, as ``TabInfo`` (one per visible IE server).
+
+    A top window counts when it is visible, belongs to an ``msedge.exe`` process and has a
+    visible ``Internet Explorer_Server`` descendant. Windows in the process trees of other live
+    ie-mcp sessions are left out. The URL is read through COM (the caller must be in a COM
+    apartment; ``""`` when pywin32 or the read is missing). Inactive tabs have a hidden server
+    window and are not listed: activate the tab in the browser first.
+    """
+    rows = processes.snapshot()
+    edge = {r.pid for r in rows if r.exe.lower() == EDGE_IMAGE}
+    if not edge:
+        return []
+    other = other_session_pids()
+    tabs = []
+    for w in (enum_fn or _enum_top_level)():
+        if not w.visible or w.pid not in edge or w.pid in other:
+            continue
+        for server in (c for c in _children(w) if c.cls == IE_SERVER_CLASS and c.visible):
+            pid = window_pid(server.hwnd) or w.pid
+            if pid in other:
+                continue
+            tabs.append(TabInfo(hwnd=server.hwnd, top_hwnd=w.hwnd,
+                                ancestors=ancestor_chain(server.hwnd), pid=pid, title=w.title,
+                                url=_server_url(server.hwnd)))
+    return tabs
+
+
+def _server_url(hwnd):
+    try:
+        from ie_mcp.win32 import htmldoc  # lazy: keeps pywin32 off the probe path
+        return str(htmldoc.document_url(hwnd) or "")
+    except Exception as exc:
+        _log_url_failure(hwnd, exc)
+        return ""
+
+
 def find_window(hwnd, with_url=False):
     """The session's ``WindowInfo`` for ``hwnd``, or None when it is not one of its windows."""
     return next((w for w in session_windows(with_url) if w.hwnd == hwnd), None)
@@ -320,6 +416,7 @@ def enumerate_windows(pids, enum_fn=None, with_url=False, attached_tops=None):
     attached = set(attached_tops or ())
     raw = list((enum_fn or _enum_top_level)())
     by_hwnd = {w.hwnd: w for w in raw}
+    attached |= _attached_helpers(raw, attached)
     main_hwnd = getattr(_session(), "main_hwnd", None)
 
     def owner_chain(window):
@@ -359,17 +456,33 @@ def enumerate_windows(pids, enum_fn=None, with_url=False, attached_tops=None):
     return out
 
 
+def _attached_helpers(raw, attached):
+    """The ``Alternate Modal Top Most`` helpers that belong to an attached tab.
+
+    Quirk (seen live): in the user's Edge the helper that owns a page's script dialogs is an
+    ownerless top-level window of the tab's IE process (``ATTACHED_PIDS``), not owned by the
+    browser window, so the owner chain of an alert never reaches the attached top. The helper is
+    taken as the tab's only when its caption (the page title) is not empty and exactly one
+    visible window carries it, and that one is an attached top: with two same-titled windows
+    the dialog could be the other one's, and a confirm of another window must never be
+    answered as this tab's.
+    """
+    if not attached or not ATTACHED_PIDS:
+        return set()
+    carriers = {}
+    for w in raw:
+        if w.visible and w.title and w.cls not in (HELPER_CLASS, SCRIPT_DIALOG_CLASS,
+                                                  DIALOG_FRAME_CLASS):
+            carriers.setdefault(w.title, []).append(w.hwnd)
+    sole = {title for title, hwnds in carriers.items() if len(hwnds) == 1 and hwnds[0] in attached}
+    return {w.hwnd for w in raw if w.cls == HELPER_CLASS and w.pid in ATTACHED_PIDS
+            and w.title in sole}
+
+
 def _read_url(window):
     server = next((c for c in _children(window) if c.cls == IE_SERVER_CLASS and c.visible),
                   next((c for c in _children(window) if c.cls == IE_SERVER_CLASS), None))
-    if server is None:
-        return ""
-    try:
-        from ie_mcp.win32 import htmldoc  # lazy: keeps pywin32 off the probe path
-        return str(htmldoc.document_url(server.hwnd) or "")
-    except Exception as exc:
-        _log_url_failure(server.hwnd, exc)
-        return ""
+    return "" if server is None else _server_url(server.hwnd)
 
 
 _warned = set()

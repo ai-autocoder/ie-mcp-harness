@@ -226,6 +226,9 @@ All configuration is via environment variables — **all optional**:
 | `ie_upload` | Set a `<input type=file>` by sending a local path; only files inside `IE_UPLOAD_DIR` (disabled when unset). |
 | `ie_dialog` | Handle a script dialog (`accept` / `dismiss` / `text` / `sendkeys`). Without `target` it uses the driver's alert, then a script alert/confirm window of the session. With `target="hwnd:<n>"` it needs no driver: it presses that window's button, but only after proving it is the session's own alert or confirm (see below). |
 | `ie_windows` | List the session's windows as JSON (`hwnd`, `target`, `kind`: main / popup / html_dialog / script_dialog / system_dialog, title, url, owner, `is_prompt`). When no modal is open and the browser is free it adds each page window's `driver_handle` and `current`. Works while a dialog is open and never waits for a busy browser. |
+| `ie_tabs` | List the IE-mode tabs the user opened in Edge (`hwnd`, `target`, `top_hwnd`, `pid`, title, url, `attached`). Only the visible tab of each window is listed. Windows of other live ie-mcp sessions are never listed. |
+| `ie_attach` | Attach to one of those tabs by `hwnd` (see [Attaching to a tab you opened](#attaching-to-a-tab-you-opened)). |
+| `ie_detach` | Go back to the driver session. The tab keeps the instrumentation until it is reloaded. |
 | `ie_switch_window` | Make a driver window (pop-up, `showModalDialog` window) the one the other tools act on: `handle`, `title_contains` or `main=true`. Returns the new title and URL. |
 | `ie_close_window` | Close a pop-up or modal dialog by `hwnd:<n>` (`window.close()` over COM, else `WM_CLOSE`) or by driver handle. Refuses the main window (`ie_close`), an attached tab (`ie_detach`) and system dialogs. |
 | `ie_console` | Records the page instrumentation made, as JSON `{records, next_since_id}`: `error` (script errors), `dialog-open` / `dialog` (an `alert`/`confirm`/`prompt` when it opens and when it closed, with the result), `modal` (`showModalDialog` URL, features, `dialogArguments` and return value), `open` (`window.open`), `console` and `xhr` (native XHR on https pages). Each has `id`, `kind`, `level`, `time`, `text` and `where` (the window target and frame path). Arguments `since_id`, `kinds`, `limit`. Text is redacted. |
@@ -268,6 +271,30 @@ dialog blocks it. Over COM:
 
 A `tab:` target never falls back to another tab: when the attached tab is gone the call fails
 and asks you to attach again.
+
+### Attaching to a tab you opened
+
+To work in a page you already opened (and logged in to) in Edge IE mode, call `ie_tabs`, then
+`ie_attach` with the tab's `hwnd`. From then on the tools above act on that tab over COM without
+a `target`, `ie_console` collects its records after every call, `ie_windows` and `ie_dialog`
+see the alerts, confirms and modal dialogs the tab opens, and `ie_screenshot scope=window`
+captures its window. `ie_detach` goes back to the driver session. Limits:
+
+- No driver-only tools while attached (navigation, history, `scope=page` screenshots, upload).
+  A tool that needs the driver and has no explicit `target` is refused with "call ie_detach
+  first" and never starts a browser. `ie_close` also needs `ie_detach` first (or `force=true`).
+- No proxy capture: the tab's traffic does not go through the recording proxy, so `ie_network`
+  sees only what the page instrumentation records.
+- A page's `prompt` cannot be answered; only `alert` and `confirm` windows pass the `ie_dialog`
+  checks.
+- The instrumentation stays in the tab after `ie_detach` until the tab is reloaded (`ie_status`
+  lists this under `modifications`).
+- An attached tab's alerts are owned by a helper window of the tab's IE process, not by the tab's
+  window. The helper is matched by process and by caption (the page title), and only when
+  exactly one visible window carries that title. With two same-titled windows the tab's dialogs
+  are not shown; give the page a distinct title or close the other window.
+- Only the visible tab of each Edge window is listed; activate the tab first. While another
+  ie-mcp session is starting its browser, `ie_attach` refuses and asks you to retry.
 
 ### Dialogs, pop-ups and system dialogs
 

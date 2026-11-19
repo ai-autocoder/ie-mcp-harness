@@ -17,6 +17,7 @@ UPSTREAM_TOOLS = {
 WINDOW_TOOLS = {"ie_windows", "ie_switch_window", "ie_close_window"}  # plan Task 9
 CONSOLE_TOOLS = {"ie_console", "ie_console_clear"}  # plan Task 12
 NETWORK_TOOLS = {"ie_network", "ie_request", "ie_network_clear"}  # plan Task 13
+ATTACH_TOOLS = {"ie_tabs", "ie_attach", "ie_detach"}  # plan Task 15
 EMPTY_SCHEMA = {"type": "object", "properties": {}}
 
 
@@ -44,7 +45,8 @@ class ProtocolTests(unittest.TestCase):
         response = protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
 
         names = {t["name"] for t in response["result"]["tools"]}
-        self.assertEqual(names, UPSTREAM_TOOLS | WINDOW_TOOLS | CONSOLE_TOOLS | NETWORK_TOOLS)
+        self.assertEqual(names, UPSTREAM_TOOLS | WINDOW_TOOLS | CONSOLE_TOOLS | NETWORK_TOOLS
+                         | ATTACH_TOOLS)
         for entry in response["result"]["tools"]:
             self.assertEqual(set(entry), {"name", "description", "inputSchema"})
 

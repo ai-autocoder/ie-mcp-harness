@@ -5,7 +5,7 @@ import time
 from ie_mcp import config, session
 from ie_mcp.protocol import driver_hold, number_arg, text_result, tool
 from ie_mcp.session import SESSION, cleanup_stale_sessions, list_ie_browsers
-from ie_mcp.tools import console
+from ie_mcp.tools import attach, console
 
 
 SLEEP_DEFAULT = 1  # seconds, for ie_sleep and its watchdog budget
@@ -131,6 +131,10 @@ def modifications(settings=None):
         "expandos __iemcp_r and __iemcp_e on the target window, cleared after each read-back "
         "(only with a hwnd:/tab: target) (off: omit target)",
     ]
+    if instrument and attach.USED:
+        rows.append("Instrumentation left in an attached tab after ie_detach: the wrappers and "
+                    "expandos above stay until the tab is reloaded (off: reload the tab, or "
+                    "IE_INSTRUMENT=0 before attaching)")
     return rows
 
 

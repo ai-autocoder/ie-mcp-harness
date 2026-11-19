@@ -418,6 +418,46 @@ def _owned_processes_for_record(record, browser_by_pid, identity=process_identit
     return owned
 
 
+STARTING_WINDOW = 180.0  # seconds a "browser is starting" mark counts (3 attach attempts)
+
+
+def _other_live_records(session_root, own_session_id, pid_alive=None):
+    """The current ``owner.json`` records of the other sessions whose owner process is alive."""
+    pid_alive = pid_alive or _PID_ALIVE
+    root = Path(session_root)
+    for owner_file in (sorted(root.glob("*/owner.json")) if root.exists() else []):
+        record = _read_json(owner_file)
+        if (record.get("session_id") or owner_file.parent.name) == own_session_id:
+            continue
+        owner_pid = record.get("owner_pid")
+        if isinstance(owner_pid, int) and pid_alive(owner_pid):
+            yield record
+
+
+def live_edge_roots(session_root, own_session_id, pid_alive=None):
+    """Edge PIDs recorded by the other ie-mcp sessions whose owner process is alive.
+
+    Only the current ``owner.json`` of each session directory counts (a stale record's browser
+    is not running any more). Used to keep another agent's windows out of ``ie_tabs``.
+    """
+    return [r["edge_pid"] for r in _other_live_records(session_root, own_session_id, pid_alive)
+            if isinstance(r.get("edge_pid"), int)]
+
+
+def starting_sessions(session_root, own_session_id, pid_alive=None, now=None):
+    """How many other live sessions are starting a browser whose Edge pid is not recorded yet.
+
+    ``SESSION.ensure`` marks its record with ``starting_since`` before IEDriver opens the window
+    and clears it once the Edge pid is recorded. Until then that window cannot be told apart
+    from a user's tab; an idle session (no browser, no mark) is never "starting".
+    """
+    now = time.time() if now is None else now
+    return sum(1 for r in _other_live_records(session_root, own_session_id, pid_alive)
+               if isinstance(r.get("starting_since"), (int, float))
+               and not isinstance(r.get("edge_pid"), int)
+               and 0 <= now - r["starting_since"] <= STARTING_WINDOW)
+
+
 def cleanup_stale_sessions(session_root, browser_rows=None, pid_alive=None,
                            identity=process_identity, kill=None):
     """Kill only browsers registered to dead ie-mcp owner processes.
@@ -911,6 +951,8 @@ class IeSession:
         last = None
         for attempt in range(1, retries + 1):
             try:
+                # Every attempt: a failed one tears down and clears the mark (_forget_processes).
+                self._mark_starting(time.time())
                 log(f"creating IE-mode session (attempt {attempt}/{retries}) url={initial_url}")
                 before = _edge_profiles()
                 before_tops = self._ie_tops()
@@ -974,6 +1016,19 @@ class IeSession:
             log(f"could not tell the main IE window: {exc}")
         log(f"session main window: hwnd={self.main_hwnd}")
 
+    @staticmethod
+    def _mark_starting(since):
+        """Record in owner.json that a browser is being started (None: it has started).
+
+        ``ie_tabs`` of another session uses it: until the Edge pid is recorded, the new window
+        cannot be told apart from a tab the user opened.
+        """
+        if LEASE.acquired:
+            try:
+                LEASE.update(starting_since=since)
+            except OSError as exc:
+                log(f"could not update the owner record: {exc}")
+
     def _capture_identity(self, before_profiles):
         """Record which browser we just opened (driver pid + the new IE-mode edge)."""
         try:
@@ -990,7 +1045,8 @@ class IeSession:
             self.edge_pid, self.profile = edge["pid"], edge["profile"]
             self.edge_identity = process_identity(self.edge_pid)
         LEASE.update(driver_pid=self.driver_pid, edge_pid=self.edge_pid, profile=self.profile,
-                     driver_identity=self.driver_identity, edge_identity=self.edge_identity)
+                     driver_identity=self.driver_identity, edge_identity=self.edge_identity,
+                     starting_since=None)
         log(f"session identity: driver_pid={self.driver_pid} edge_pid={self.edge_pid} profile={self.profile}")
 
     # -- teardown --
@@ -1039,7 +1095,7 @@ class IeSession:
             try:
                 LEASE.update(driver_pid=self.driver_pid, edge_pid=self.edge_pid,
                              profile=self.profile, driver_identity=self.driver_identity,
-                             edge_identity=self.edge_identity)
+                             edge_identity=self.edge_identity, starting_since=None)
             except Exception as exc:
                 log(f"could not update the owner record: {exc}")
         return keep_driver or keep_edge

@@ -17,7 +17,7 @@ import traceback
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from ie_mcp import config
+from ie_mcp import backends, config
 from ie_mcp.session import DRIVER_LOCK, log
 from ie_mcp.win32 import htmldoc, windows
 
@@ -207,6 +207,7 @@ AFTER_CALL_WAIT = 2.0  # seconds the worker waits for each AFTER_CALL thread
 def _probe():
     """The open modal windows; a failing probe means "none" (and is logged)."""
     try:
+        backends.prune_attached()  # before the probe reads ATTACHED_TOPS
         return list(MODAL_PROBE() or [])
     except Exception as exc:
         log(f"modal probe failed: {exc}")
@@ -467,6 +468,13 @@ def run_tool(spec, args):
         wants_driver = bool(spec.needs_driver(args))
     except Exception:
         wants_driver = True
+    if wants_driver and not args.get("target"):
+        backends.prune_attached()  # a tab that is gone must not keep refusing (or hold a top)
+        attached = backends.attached_tab()
+        if attached is not None:
+            # Before the lock and before any worker: such a call must never start a browser.
+            return _error_result(f"attached to tab {attached}: this tool needs the driver "
+                                 "session; call ie_detach first")
     hold = None
     if wants_driver:
         hold = _take_driver(spec.name, budget)

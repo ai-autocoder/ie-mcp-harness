@@ -135,14 +135,18 @@ ie_mcp/
   config.py          Settings (every env var, read once), discover_driver_path
   protocol.py        JSON-RPC loop (one thread per tools/call), @tool registry, run_tool watchdog
                      (call_budget, BUSY/BLOCKED, CALL_CONTEXTS, MODAL_PROBE notices, POST_HOOKS, AFTER_CALL)
-  session.py         IeSession, build_options, SessionLease, process tracking/cleanup, DRIVER_LOCK (plain Lock)
+  session.py         IeSession, build_options, SessionLease, process tracking/cleanup, DRIVER_LOCK (plain Lock);
+                     owner record `starting_since` while a browser starts (ie_attach refuses meanwhile)
   backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); target_kind, resolve_backend,
-                     DEFAULT_TARGET, ATTACHED_CHAINS, TAB_ANCESTOR_CLASS (None: D15 = ie-server), js_literal
+                     DEFAULT_TARGET, ATTACHED_CHAINS, TAB_ANCESTOR_CLASS (None: D15 = ie-server), js_literal;
+                     attach state: ATTACH_LOCK (held only for the swap, never across COM), attached_tab,
+                     attach_tab, detach_tab, prune_attached
   png.py             encode_png (stdlib zlib/struct, 8-bit RGBA, filter 0)
   win32/
     processes.py     process_identity (image + creation time), snapshot (2 s cache; fresh=True skips it), process_tree
     windows.py       ctypes only: enumerate_windows, classify, modal_probe (visible windows only, no COM), session_window_pids,
-                     ATTACHED_TOPS, pick_main_hwnd (ie_mode_tabs comes with Task 15)
+                     ATTACHED_TOPS / ATTACHED_PIDS (rebound, never mutated), pick_main_hwnd, TabInfo,
+                     ie_mode_tabs (excludes other live sessions' trees), ancestor_chain
     htmldoc.py       com_apartment, com_call (retries rejected calls), ie_server_child, document_from_hwnd, document_url (pywin32, lazy)
     messages.py      the only module that posts window messages (post_message, WM_COMMAND/WM_CLOSE) + is_window, get_text (ctypes)
     dialogs.py       the safety gate: confirm_script_dialog (session window + helper/dialog-frame owner + exact direct-child
@@ -356,6 +360,14 @@ the upstream code behaves as before:
   before the first capture); a failed file write is reported and the image still returned.
   `ie_text` falls back to `document.body.innerText`; `ie_frames` reads `name`/`id`/`src` with
   `js/frames.js`. `ie_open` needs an http(s) URL in IE mode.
+- **Attached tabs (plan Task 15, done).** `tools/attach.py`: `ie_tabs`, `ie_attach`, `ie_detach`
+  (`needs_driver=False`). `ie_attach` looks the tab up and probes it over COM without any lock,
+  then swaps `DEFAULT_TARGET`, `ATTACHED_CHAINS`, `ATTACHED_TOPS` and `ATTACHED_PIDS` under
+  `backends.ATTACH_LOCK` (re-checking the windows still exist); a failed re-attach keeps the old
+  tab. While attached, `run_tool` refuses any tool whose `needs_driver(args)` is true and that has
+  no explicit `target` ("call ie_detach first"); it prunes a dead tab first, as does
+  `protocol._probe`. The attach drains the tab once (`instrumented` = the drain answered).
+  `ie_status modifications` lists the "instrumentation left after ie_detach" row once attached.
 - **Session lifecycle (plan Task 5, done).** `session.kill_verified` is the only kill path
   (`taskkill /F /PID`, no `/T`, only when `process_identity` still equals the recorded image
   name + creation time; a recorded `None` or malformed identity never kills). `owner.json`
@@ -431,6 +443,11 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 
 ## Known IE-mode / IEDriver quirks
 
+- In a tab the user opened, script dialogs and `showModalDialog` windows are owned by an
+  ownerless `Alternate Modal Top Most` helper of the tab's IE process, not by the Edge window.
+  `enumerate_windows` takes such a helper as the attached tab's only when its pid is in
+  `ATTACHED_PIDS` and exactly one visible window carries its (non-empty) caption, an attached
+  top.
 - Navigate **during session creation** (`initial_browser_url`). Navigating afterwards across
   the Protected-Mode boundary can make the driver lose the browser.
 - `page_load_strategy = "none"`; readiness is detected with `ie_wait_ready`.

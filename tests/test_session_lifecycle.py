@@ -134,6 +134,25 @@ class EnsureTests(LifecycleTestCase):
         self.assertEqual(attempts, [os.getpid()] * 3)
         self.assertEqual(self.lock_owner(), os.getpid())
 
+    def test_every_attempt_is_marked_as_starting_in_the_owner_record(self):
+        # A failed attempt's teardown clears the mark; the retries must set it again.
+        s = IeSession()
+        marks = []
+
+        def builder(initial_url, **kwargs):
+            marks.append(session._read_json(self.paths.owner_file).get("starting_since"))
+            if len(marks) < 3:
+                raise RuntimeError("transient attach failure")
+            return FakeDriver()
+
+        with mock.patch.object(s, "_build", side_effect=builder):
+            s.ensure(initial_url="http://127.0.0.1/")
+
+        self.assertEqual(len(marks), 3)
+        self.assertTrue(all(isinstance(m, float) for m in marks), marks)
+        # once the browser is up the mark is gone
+        self.assertIsNone(session._read_json(self.paths.owner_file).get("starting_since"))
+
     def test_failed_attempts_tear_the_browser_down_without_releasing_the_lease(self):
         s = IeSession()
         drivers = []
