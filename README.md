@@ -1,5 +1,6 @@
 # ie-mcp
 
+[![CI](https://github.com/ai-autocoder/ie-mcp-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/ai-autocoder/ie-mcp-harness/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
@@ -727,6 +728,11 @@ Each module closes its session and checks that no Edge or IEDriver process it st
 (frames, a form post, a modal dialog, console, screenshot), then checks that closing stdin with a
 dialog open leaves no browser behind. `IE_FIXTURE_HOST` (default `127.0.0.1`) moves the fixture
 site to another loopback name for these tests.
+
+CI (`.github/workflows/ci.yml`) runs the unit tests on `windows-latest` with Python 3.10 and
+3.14 and checks that the wheel ships the server and the fixture site. It cannot run the
+integration tests or `ie-mcp --selftest` (no IE mode on a hosted runner), so run those by hand
+before a release.
 
 ### Contributing
 

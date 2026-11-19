@@ -1,0 +1,41 @@
+# Unit tests and a packaging check on Windows. The integration tests and `ie-mcp --selftest`
+# need Edge IE mode on an unlocked interactive desktop, which hosted runners do not have:
+# run those by hand before a release (README, Development > Tests).
+name: CI
+
+on:
+  push:
+    branches: [main, harness]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install -e ".[win32]" build
+      - name: Unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Wheel ships the server and the fixture site
+        shell: bash
+        run: |
+          python -m build --wheel --outdir dist
+          python - <<'EOF'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("dist/*.whl")[0]).namelist()
+          for need in ("ie_mcp/cli.py", "ie_mcp/js/instrument.js", "ie_mcp_fixtures/site/form.htm"):
+              assert need in names, f"{need} missing from the wheel"
+          print(len(names), "files in the wheel")
+          EOF
