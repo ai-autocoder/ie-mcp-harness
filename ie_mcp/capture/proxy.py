@@ -781,7 +781,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             entry.truncated = entry.truncated or capture.truncated
             if prefix is not None and is_html:
                 proxy._set_charset(entry.url, _scan_charset(prefix))
-            if not done:
+            if done:
+                # Python 3.10's read1 can reach the end of the body without marking the
+                # response closed, and the kept-alive connection then refuses the next request
+                # (ResponseNotReady). The body is fully read, so closing it is safe.
+                resp.close()
+            else:
                 self._drop(key)  # a half-read response leaves the connection unusable
 
     @staticmethod
