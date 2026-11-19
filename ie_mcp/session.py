@@ -14,7 +14,11 @@ import time
 from pathlib import Path
 
 from ie_mcp import config
+from ie_mcp import js as page_scripts
+from ie_mcp.capture import verify
+from ie_mcp.capture.proxy import RecordingProxy
 from ie_mcp.capture.redact import Redactor
+from ie_mcp.capture.store import CaptureStore
 from ie_mcp.win32.processes import process_identity
 # Re-exported: these are part of this module's public surface (and of upstream's).
 from ie_mcp.config import SessionPaths, build_session_paths  # noqa: F401
@@ -559,6 +563,16 @@ SESSION_CREATE_TIMEOUT = 60
 QUIT_TIMEOUT = 10
 # Seconds between two failed attempts to create a session.
 RETRY_DELAY = 2
+# Seconds ie_open/ie_goto wait for the proxy to show the request of a navigation before they
+# declare the browser blind to it (the tools add it to their watchdog budget).
+VERIFY_WAIT = 5
+VERIFY_POLL = 0.1
+# The JSONL copy of the capture lives here (IE_CAPTURE_JSONL=1), deleted on close().
+CAPTURE_JSONL_NAME = "capture.jsonl"
+ZONE_NOTICE = ("NOTICE: {host} normally bypasses your proxy. Through the capture proxy, IE may "
+               "put it in another security zone (different document mode, Protected Mode, "
+               "logon). If the page behaves differently, set IE_CAPTURE_BYPASS={host}.")
+BLIND_NOTICE = "NOTICE: network capture is off: the browser did not use the proxy"
 
 
 def _edge_profiles(rows=None):
@@ -615,6 +629,20 @@ class IeSession:
         # The Service of a session being created right now: its IEDriver exists before
         # webdriver.Ie() returns, so a force-close during creation can still find it.
         self._creating_service = None
+        # --- network capture (plan Task 13) ---
+        # One RecordingProxy per browser instance (a new browser gets a new port, the old one
+        # is stopped with it); one CaptureStore per session, kept across browsers so ie_network
+        # still shows what an ie_close'd browser did, and so page-source XHR entries have a home
+        # when the proxy is off. None until the first browser is built.
+        self.proxy = None
+        self.store = None
+        # None: not verified yet; True: the proxy saw a navigation; False: it did not (or it
+        # could not start). The browser's initial URL is never proxied (spike D11), so a new
+        # browser always starts at None.
+        self.capture_active = None
+        self.capture_error = None   # why the proxy could not start, for ie_status
+        self.initial_url = None     # the URL this browser was created on (not proxied)
+        self.proxy_override = []    # ProxyOverride entries read at proxy start, for the zone notice
 
     # -- cancellation --
     def check_cancel(self):
@@ -694,8 +722,17 @@ class IeSession:
                 "(~/.cache/selenium/IEDriverServer). Set IE_DRIVER_PATH to its full path.")
         if not os.path.isfile(driver_path):
             raise FileNotFoundError(f"IE_DRIVER_PATH does not point to a file: {driver_path}")
-        options = build_options(settings, initial_url)
-        service = Service(executable_path=driver_path, env=driver_environment())
+        # The proxy starts BEFORE the driver: the browser is told its port when it is created.
+        self._start_capture(settings, initial_url)
+        try:
+            options = build_options(
+                settings, initial_url,
+                proxy_port=self.proxy.port if self.proxy is not None else None,
+                bypass=settings.capture_bypass)
+            service = Service(executable_path=driver_path, env=driver_environment())
+        except BaseException:
+            self._stop_capture()
+            raise
         driver = None
         self._creating_service = service
         try:
@@ -704,10 +741,143 @@ class IeSession:
         except BaseException:
             self._quit_driver(driver, QUIT_TIMEOUT)  # bounded, like every other quit
             self._reap_failed_attempt(service, before_profiles)
+            self._stop_capture()  # a proxy must never outlive the attempt it was started for
             raise
         finally:
             self._creating_service = None
         return driver
+
+    # -- network capture --
+    def _ensure_store(self, settings):
+        """The session's CaptureStore, made again only when the settings it was built with
+        changed (body limit, JSONL on/off), so ids and entries survive an ``ie_close``."""
+        store = self.store
+        wants_jsonl = bool(settings.capture_jsonl)
+        if (store is not None and store.max_body == settings.capture_max_body
+                and (store.jsonl_path is not None) == wants_jsonl
+                and store.redactor is REDACTOR):
+            return store
+        self._discard_jsonl(settings)
+        jsonl_path = settings.session_paths.directory / CAPTURE_JSONL_NAME if wants_jsonl else None
+        self.store = CaptureStore(REDACTOR, max_body=settings.capture_max_body,
+                                  jsonl_path=jsonl_path)
+        return self.store
+
+    def _instrument_js(self, settings):
+        """What ``/__iemcp__/i.js`` serves: the flags instrument.js reads, then instrument.js.
+
+        ``wrap_xhr`` is false here: a page that loaded this script came through the proxy, which
+        records its XMLHttpRequest traffic itself (spike D4). When the proxy turns out to be
+        blind it is never asked for the script, and the post-call hook sends the flag as true.
+        """
+        flags = ("window.__iemcp_stub=%s;window.__iemcp_wrap_xhr=false;\n"
+                 % ("true" if settings.console_stub else "false"))
+        return (flags + page_scripts.load("instrument.js")).encode("utf-8")
+
+    @staticmethod
+    def check_capture_settings(settings):
+        """Raise a one-line RuntimeError naming IE_CAPTURE_UPSTREAM_PROXY when it is malformed.
+
+        The value is parsed at load but not rejected there (the server must still start and
+        list its tools); it matters only once a proxy would use it.
+        """
+        if settings.capture and settings.capture_upstream_proxy_error:
+            raise RuntimeError(settings.capture_upstream_proxy_error)
+
+    def _start_capture(self, settings, initial_url):
+        """Start the recording proxy for a new browser (when IE_CAPTURE is on) and reset the
+        capture state. A proxy that cannot start (port, firewall) leaves ``capture_active``
+        False: the session still works and the page-level XHR wrapper takes over."""
+        self.check_capture_settings(settings)
+        self._stop_capture()  # never two proxies
+        self.capture_active = None
+        self.capture_error = None
+        self.initial_url = initial_url
+        store = self._ensure_store(settings)
+        if not settings.capture:
+            return
+        instrument_js = self._instrument_js(settings) if settings.instrument else None
+        proxy = RecordingProxy(store, host="127.0.0.1", port=0, instrument_js=instrument_js,
+                               upstream_proxy=settings.capture_upstream_proxy,
+                               no_cache=settings.capture_no_cache)
+        try:
+            proxy.start()
+        except OSError as exc:
+            self.capture_error = f"{type(exc).__name__}: {exc}"
+            self.capture_active = False
+            log(f"the capture proxy could not start: {self.capture_error}")
+            return
+        self.proxy = proxy
+        self.proxy_override = verify.read_proxy_override()
+        log(f"capture proxy listening on 127.0.0.1:{proxy.port}")
+
+    def _stop_capture(self):
+        """Stop the proxy (its listening socket and handler threads) and forget the verdict."""
+        proxy, self.proxy = self.proxy, None
+        self.capture_active = None
+        if proxy is not None:
+            try:
+                proxy.stop()
+            except Exception as exc:
+                log(f"could not stop the capture proxy cleanly: {exc}")
+
+    def _discard_jsonl(self, settings=None):
+        """Delete the JSONL copy of the capture, unless IE_KEEP_ARTIFACTS=1."""
+        settings = config.SETTINGS if settings is None else settings
+        path = getattr(self.store, "jsonl_path", None)
+        if path is None or settings.keep_artifacts:
+            return
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log(f"could not delete {path}: {exc}")
+
+    def _proxy_saw(self, url, wait):
+        """True once the proxy has seen ``url`` (polled for up to ``wait`` seconds)."""
+        deadline = time.monotonic() + max(0, wait)
+        while True:
+            proxy = self.proxy
+            if proxy is None:
+                return False
+            if verify.url_seen(url, list(proxy.seen)):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            self.pause(VERIFY_POLL)
+
+    def verify_navigation(self, url, fresh=False):
+        """Verify capture after ``ie_open``/``ie_goto`` of ``url``; the NOTICE texts to append.
+
+        ``fresh`` is a call that created the browser: its URL went in as the initial URL, which
+        is never proxied (D11), so nothing can be concluded and nothing is said. Only http(s)
+        URLs whose host is not in ``IE_CAPTURE_BYPASS`` count. A request the proxy does not show
+        within ``VERIFY_WAIT`` seconds makes ``capture_active`` False; a later navigation that
+        it does show makes it True again (a blind verdict is rechecked, without waiting).
+        """
+        notices = []
+        settings = config.SETTINGS
+        target = verify.http_target(url)
+        if self.proxy is None or fresh or target is None:
+            return notices
+        host = target[1]
+        if verify.host_matches(host, settings.capture_bypass):
+            return notices
+        if self.capture_active is not True:
+            # Quirk: the page the browser started on may be served from the browser cache
+            # without a request, so its absence from the proxy proves nothing.
+            if verify.url_seen(url, [self.initial_url or ""]) and not self._proxy_saw(url, 0):
+                return notices
+            was_unverified = self.capture_active is None
+            if self._proxy_saw(url, VERIFY_WAIT if was_unverified else 0):
+                self.capture_active = True
+            elif was_unverified:
+                self.capture_active = False
+                notices.append(BLIND_NOTICE)
+        if self.capture_active is True and verify.override_matches(host, self.proxy_override):
+            notices.append(ZONE_NOTICE.format(host=host))
+        return notices
 
     def ensure(self, initial_url=None):
         """Return a live driver, (re)creating it with retries if needed.
@@ -733,6 +903,8 @@ class IeSession:
                 log("session dead, recreating")
                 self.quit_browser()
 
+        # A malformed IE_CAPTURE_UPSTREAM_PROXY is fixed by the user, not by retrying 3 times.
+        self.check_capture_settings(config.SETTINGS)
         acquire_lock()  # refuse only if another process owns this session identity
         self.cancel.clear()  # a force-close of the previous browser must not stop this one
         retries = config.SETTINGS.attach_retries
@@ -879,6 +1051,7 @@ class IeSession:
         self._quit_driver(driver, QUIT_TIMEOUT)
         # IEDriver often leaves the IE-mode Edge window alive: kill ours, if still ours.
         self._forget_processes(self.kill_own_processes())
+        self._stop_capture()  # the proxy belongs to this browser instance; the store stays
 
     def force_kill(self):
         """Stop everything at once without ever calling the driver (``ie_close(force=true)``).
@@ -891,6 +1064,7 @@ class IeSession:
         self.driver = None
         self.main_hwnd = None
         self._forget_processes(killed)
+        self._stop_capture()
         return killed
 
     def close(self, timeout_s=10):
@@ -905,6 +1079,8 @@ class IeSession:
         self.main_hwnd = None
         self._quit_driver(driver, timeout_s)
         survivors = self._forget_processes(self.kill_own_processes())
+        self._stop_capture()
+        self._discard_jsonl()
         if not survivors:
             release_lock()
 

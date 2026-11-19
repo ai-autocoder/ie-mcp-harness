@@ -1,13 +1,27 @@
 """Navigation tools: open, goto, back, forward, resize, close."""
 import time
 
-from ie_mcp import config
+from ie_mcp import config, session
 from ie_mcp.protocol import attach_budget, text_result, tool
 from ie_mcp.session import SESSION, log
 
 # Post-load pauses; the watchdog budget below is computed from the same defaults.
 OPEN_WAIT = 4
 GOTO_WAIT = 3
+
+
+def navigation_budget(wait):
+    """``attach_budget`` plus the wait for the proxy to show the navigation (capture check)."""
+    attach = attach_budget(wait)
+    return lambda args: attach(args) + session.VERIFY_WAIT
+
+
+def with_capture_notices(result, url, fresh=False):
+    """``result`` plus one NOTICE item per capture finding about the navigation to ``url``
+    (the proxy did not see it; the host normally bypasses the user's proxy)."""
+    for notice in SESSION.verify_navigation(url, fresh=fresh):
+        result["content"].append({"type": "text", "text": notice})
+    return result
 
 
 @tool(
@@ -23,7 +37,7 @@ GOTO_WAIT = 3
             "wait": {"type": "number", "description": "seconds to wait after load (default 4)"},
         },
     },
-    budget=attach_budget(OPEN_WAIT),
+    budget=navigation_budget(OPEN_WAIT),
 )
 def t_open(args):
     url = args.get("url") or config.SETTINGS.default_url
@@ -37,7 +51,9 @@ def t_open(args):
         except Exception as exc:
             log("get() note:", exc)
     time.sleep(args.get("wait", OPEN_WAIT))
-    return text_result(f"opened {url}\ntitle: {d.title}\nurl: {d.current_url}")
+    # A new session's URL is its initial URL, which the proxy never sees (spike D11).
+    return with_capture_notices(
+        text_result(f"opened {url}\ntitle: {d.title}\nurl: {d.current_url}"), url, fresh=fresh)
 
 
 @tool(
@@ -48,7 +64,7 @@ def t_open(args):
         "properties": {"url": {"type": "string"}, "wait": {"type": "number"}},
         "required": ["url"],
     },
-    budget=attach_budget(GOTO_WAIT),
+    budget=navigation_budget(GOTO_WAIT),
 )
 def t_goto(args):
     url = args["url"]
@@ -58,7 +74,7 @@ def t_goto(args):
     except Exception as exc:
         log("get() note:", exc)
     time.sleep(args.get("wait", GOTO_WAIT))
-    return text_result(f"title: {d.title}\nurl: {d.current_url}")
+    return with_capture_notices(text_result(f"title: {d.title}\nurl: {d.current_url}"), url)
 
 
 @tool(

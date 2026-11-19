@@ -5,6 +5,7 @@ Documents modes of the fixture pages (spike): index 11, form 7, quirks 11, headl
 import json
 import unittest
 
+from ie_mcp import config
 from ie_mcp.session import SESSION
 from ie_mcp.win32 import htmldoc
 from tests.integration.base import IntegrationTestCase
@@ -159,7 +160,15 @@ class ReadInteractTests(IntegrationTestCase):
         names = self.text("ie_js", script=(
             "var n = []; for(var k in window){ if(k.indexOf('__iemcp') == 0){ n.push(k); } }"
             "n.sort(); return n.join(',');"))
-        self.assertIn(json.loads(names), ("__iemcp_e,__iemcp_r", ""))
+        # The page instrumentation (IE_INSTRUMENT, on by default) adds its own documented
+        # expandos (Fidelity table); nothing else may be left behind.
+        documented = {"__iemcp_e", "__iemcp_r", "__iemcp", "__iemcp_stub", "__iemcp_wrap_xhr"}
+        left = set(filter(None, json.loads(names).split(",")))
+        self.assertLessEqual(left, documented)
+        if config.SETTINGS.instrument:
+            # ...and with instrumentation on they really are there (this ran through the
+            # driver hook), plus the two COM expandos that were just emptied, not removed.
+            self.assertEqual(left, documented)
 
     def test_com_js_results_and_arguments(self):
         self.open_page("index.htm")

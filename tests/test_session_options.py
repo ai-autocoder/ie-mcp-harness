@@ -124,9 +124,13 @@ class DriverTimeoutTests(unittest.TestCase):
         from selenium import webdriver
 
         fake_driver = mock.Mock()
+        ie_session = session.IeSession()
+        # _build starts the capture proxy (IE_CAPTURE defaults to on): stop it again.
+        self.addCleanup(ie_session._stop_capture)
         with mock.patch.object(webdriver, "Ie", return_value=fake_driver) as ie, \
+                mock.patch.object(session, "log"), \
                 mock.patch.object(session, "apply_driver_timeout") as apply_timeout:
-            built = session.IeSession()._build("http://127.0.0.1:1/", settings)
+            built = ie_session._build("http://127.0.0.1:1/", settings)
         return built, fake_driver, ie, apply_timeout
 
     def test_build_creates_the_driver_with_the_http_timeout(self):

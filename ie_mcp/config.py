@@ -41,6 +41,16 @@ Configuration (all via env vars, all optional):
                     turns every page modification of that kind off
   IE_CONSOLE_STUB   1/true/yes creates a complete no-op `console` where a page has none, so
                     the page's console calls are recorded (default off: nothing is created)
+  IE_CAPTURE        1 (default) puts the IE-mode browser (only it, never the system) behind a local
+                    recording proxy on 127.0.0.1, which feeds ie_network/ie_request and inserts
+                    the instrumentation loader into HTML documents; 0/false/no/off turns it off
+  IE_CAPTURE_UPSTREAM_PROXY  host:port of a proxy the capture proxy forwards to (unset: direct)
+  IE_CAPTURE_BYPASS comma-separated host patterns that stay off the capture proxy (for hosts
+                    that must keep their normal proxy bypass and so their IE security zone)
+  IE_CAPTURE_NO_CACHE 1/true/yes strips conditional request headers so revalidations become
+                    full fetches the proxy can see (default off)
+  IE_KEEP_ARTIFACTS 1/true/yes keeps the JSONL capture file when the server exits (default:
+                    it is deleted; screenshots saved by name are always kept)
   IE_SESSION_ID     logical agent/session name (default pid-<mcp process PID>)
   IE_SESSION_ROOT   root for per-session logs, locks, and ownership records
   IE_LOG_FILE       log file (default <session directory>/ie-mcp.log)
@@ -55,6 +65,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+
+from ie_mcp.capture.verify import parse_bypass, parse_upstream_proxy
 
 DEFAULT_EDGE_PATH = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
@@ -211,6 +223,14 @@ class Settings:
     capture_jsonl: bool = False
     instrument: bool = True  # IE_INSTRUMENT: page wrappers, hooks and TaskDialog accept evidence
     console_stub: bool = False  # IE_CONSOLE_STUB: create a no-op console where the page has none
+    capture: bool = True  # IE_CAPTURE: the recording proxy (spike D12 = no: on by default)
+    capture_upstream_proxy: tuple[str, int] | None = None  # IE_CAPTURE_UPSTREAM_PROXY
+    # Why IE_CAPTURE_UPSTREAM_PROXY could not be parsed. Not raised at load: the server must
+    # still start and list its tools (like a bad IE_DRIVER_PATH); the session start raises it.
+    capture_upstream_proxy_error: str | None = None
+    capture_bypass: tuple[str, ...] = ()  # IE_CAPTURE_BYPASS host patterns kept off the proxy
+    capture_no_cache: bool = False  # IE_CAPTURE_NO_CACHE
+    keep_artifacts: bool = False  # IE_KEEP_ARTIFACTS: keep the JSONL file on exit
 
 
 def _flag(env, name):
@@ -262,6 +282,11 @@ def load_settings(env: Mapping[str, str], pid: int | None = None,
     start and list its tools); the session reports it when it tries to launch the driver.
     """
     interaction_mode = resolve_interaction_mode(env)
+    upstream_proxy, upstream_proxy_error = None, None
+    try:
+        upstream_proxy = parse_upstream_proxy(env.get("IE_CAPTURE_UPSTREAM_PROXY"))
+    except ValueError as exc:
+        upstream_proxy_error = str(exc)
     driver_path = env.get("IE_DRIVER_PATH") or discover_driver_path(
         env, Path.home() if home is None else home)
     return Settings(
@@ -286,6 +311,12 @@ def load_settings(env: Mapping[str, str], pid: int | None = None,
         capture_jsonl=_flag(env, "IE_CAPTURE_JSONL"),
         instrument=_flag_default_on(env, "IE_INSTRUMENT"),
         console_stub=_flag(env, "IE_CONSOLE_STUB"),
+        capture=_flag_default_on(env, "IE_CAPTURE"),
+        capture_upstream_proxy=upstream_proxy,
+        capture_upstream_proxy_error=upstream_proxy_error,
+        capture_bypass=parse_bypass(env.get("IE_CAPTURE_BYPASS")),
+        capture_no_cache=_flag(env, "IE_CAPTURE_NO_CACHE"),
+        keep_artifacts=_flag(env, "IE_KEEP_ARTIFACTS"),
     )
 
 

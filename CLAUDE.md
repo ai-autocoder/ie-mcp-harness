@@ -119,10 +119,10 @@ modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
 scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
 `win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
 exist (Task 9); `capture/store.py` and `capture/redact.py` exist, and `session.log()` goes
-through `session.REDACTOR` (Task 10); `capture/proxy.py` exists, not yet wired into the session
-(Task 11; Task 13 wires it); `capture/console.py`, `tools/console.py` and `js/instrument.js`,
-`hook.js`, `drain.js` exist (Task 12). Keep
-this section in sync with the plan and the code.
+through `session.REDACTOR` (Task 10); `capture/proxy.py` exists (Task 11);
+`capture/console.py`, `tools/console.py` and `js/instrument.js`, `hook.js`, `drain.js` exist
+(Task 12); `capture/verify.py` and `tools/network.py` exist, and the proxy is wired into the
+session (Task 13). Keep this section in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
 `from ie_mcp.config import SETTINGS`), so tests can replace it. Tools register themselves with
@@ -153,11 +153,14 @@ ie_mcp/
     redact.py        Redactor (name-segment matching, value masking)
     proxy.py         RecordingProxy, loader_tag, is_document_request, find_insertion_point
     console.py       ConsoleRecord, ConsoleStore, parse_records
+    verify.py        pure capture helpers: http_target, url_seen (normalised URL / CONNECT matching), host_matches,
+                     override_matches, read_proxy_override (winreg, read-only), parse_bypass, parse_upstream_proxy
   js/                ES3 scripts: select.js, grid.js, ready_probe.js, frames.js, com_run.js, com_frame.js,
                      com_prelude.js (COM request runner, frame resolution, locator/event helpers),
                      instrument.js, hook.js, drain.js
   tools/             navigation.py, read.py, interact.py, windows.py (ie_windows, ie_switch_window, ie_close_window),
-                     dialogs.py (ie_dialog), network.py, console.py, attach.py, diagnostics.py
+                     dialogs.py (ie_dialog), network.py (ie_network, ie_request, ie_network_clear), console.py,
+                     attach.py, diagnostics.py (ie_status incl. capture/modifications)
 ie_mcp_fixtures/
   server.py          start_fixture_server (origins 127.0.0.1 and localhost), requests log, python -m ie_mcp_fixtures
   site/              legacy fixture pages
@@ -270,12 +273,54 @@ the upstream code behaves as before:
   COM for `html_dialog`s, the page windows behind a script dialog, an explicit `hwnd:`/`tab:`
   target (POST_HOOKS stay driver-only) and a `tab:` `DEFAULT_TARGET`. `tools/console.py`
   `ingest` stores records in `STORE` (redacted); `xhr` records also go to `NETWORK_STORE` as
-  `source="page"` entries (None until Task 13). `IE_INSTRUMENT=0`: both hooks return at once.
+  `source="page"` entries (into `SESSION.store`, the session's CaptureStore, unless a test sets
+  `NETWORK_STORE`). `IE_INSTRUMENT=0`: both hooks return at once.
   Records of a dialog that closes between two calls are lost; load-time errors of the first page
   are not captured (D11).
+- **Network capture wiring (plan Task 13, done).** `IE_CAPTURE` defaults to 1 (D12 = no).
+  `IeSession._build` starts a `RecordingProxy` BEFORE the driver, bound to `127.0.0.1` (port 0)
+  and `build_options(proxy_port=..., bypass=IE_CAPTURE_BYPASS)` points only the browser at it
+  (`use_per_process_proxy=True`, `noProxy` a list). `instrument_js` is flags
+  (`__iemcp_stub`, `__iemcp_wrap_xhr=false`) + `instrument.js`, None with `IE_INSTRUMENT=0`;
+  `upstream_proxy`/`no_cache` come from `IE_CAPTURE_UPSTREAM_PROXY`/`IE_CAPTURE_NO_CACHE`. One
+  proxy per browser instance, one `CaptureStore` per `IeSession` (created at the first build,
+  also with `IE_CAPTURE=0`, so page-source XHR entries have a home; kept across `ie_close`;
+  rebuilt only when `IE_CAPTURE_MAX_BODY`/`IE_CAPTURE_JSONL` change). The proxy is stopped on
+  every teardown path: `close()`, `quit_browser()` (so the `ensure` retry loop too),
+  `force_kill()` and a failed `_build`. `IE_CAPTURE_JSONL=1` writes
+  `<session dir>/capture.jsonl`, deleted by `close()` (not `ie_close`) unless
+  `IE_KEEP_ARTIFACTS=1`. A proxy that cannot start leaves `capture_active` False and the
+  session works (page-level XHR wrapper). A malformed `IE_CAPTURE_UPSTREAM_PROXY` is NOT raised
+  at settings load (the server must still start and list its tools): it is kept in
+  `Settings.capture_upstream_proxy_error` and raised as a one-line `RuntimeError` naming the
+  variable by `ensure()`/`_start_capture` (and shown as `capture_config_error`).
+  `IeSession.capture_active` is `None` (not verified), `True` (the proxy saw a navigation) or
+  `False` (it did not). The session's initial URL is never proxied (D11), so an `ie_open` that
+  creates the browser leaves it `None` and says nothing; the first `ie_open`/`ie_goto` to an
+  http(s) URL (host not in `IE_CAPTURE_BYPASS`) after creation polls `proxy.seen` for 5 s
+  (`session.VERIFY_WAIT`, added to both tools' budgets), comparing normalised URLs (scheme and
+  host case, default port, fragment; for https a CONNECT to `host:port`), and sets True, or False
+  plus `NOTICE: network capture is off: the browser did not use the proxy`. `about:`/`file:`
+  leave it `None`; a miss for the browser's own initial URL concludes nothing (browser-cache
+  hit); a False verdict is rechecked without waiting on later navigations. The zone notice
+  (`ZONE_NOTICE`) is added when capture is verified and the host matches a `ProxyOverride`
+  entry (read once at proxy start with `winreg`, `KEY_READ` only) or is dotless with `<local>`
+  listed, and is not in `IE_CAPTURE_BYPASS`.
+- **ie_status capture fields and the network tools (Task 13).** `ie_status` adds `capture`
+  (`off`, `proxy`, `page-only`, `unverified`), `capture_note` (what is not captured: the initial
+  URL, fresh cache hits, HTTPS content; the bypass hosts when `IE_CAPTURE_BYPASS` is set; the
+  zone sentence), `capture_internal_errors` (`{count, last}`, redacted, only when the proxy
+  recorded bugs), `capture_config_error`, and `modifications`: every Fidelity-table row whose
+  switch is on, each ending `(off: ...)`. The loader, Accept-Encoding and no-store rows need
+  capture AND `IE_INSTRUMENT=1`; the proxy rows disappear when `capture_active` is False; the
+  async-click, COM-input and COM-wrapper rows are always listed with their trigger.
+  `diagnostics.status_info()` builds the browser-free part. `ie_network`, `ie_request` and
+  `ie_network_clear` (`tools/network.py`, `needs_driver=False`) read `SESSION.store`;
+  `ie_request` decodes bodies with the Content-Type charset, then `referer_charset`, then
+  cp1252 (form bodies are percent-decoded the same way), decodes gzip/deflate from a copy
+  (4 MiB cap, said when hit) and summarises binary bodies as `<binary N bytes>`.
 - **Network capture** comes from a streaming local recording proxy that only the IE-mode
-  browser process uses. It is verified on the first http(s) navigation and reported as
-  unverified or off otherwise. **`capture/proxy.py` (plan Task 11, done; wired by Task 13):**
+  browser process uses (wiring: the previous point). **`capture/proxy.py` (plan Task 11, done):**
   `RecordingProxy(store, host, port, instrument_js, upstream_proxy, no_cache)` forwards only
   absolute-form http requests to their own target (or to `upstream_proxy`), keeps one upstream
   `HTTPConnection` per client connection and host:port (one per client connection when chained),
@@ -287,7 +332,8 @@ the upstream code behaves as before:
   `is_document_request` holds (D10: `Accept` contains `text/html`; such requests are sent with
   `Accept-Encoding: identity`); `find_insertion_point` decides on at most 64 KB. Bodies are stored
   as received (a gzip response stays compressed). `seen` (1000), `first_request` and
-  `doc_charsets` (1000) are what Task 13 needs for D11 verification and `referer_charset`.
+  `doc_charsets` (1000) feed the D11 verification and `referer_charset`; `internal_errors`
+  (bugs only) is shown by `ie_status`.
   `stop()` wakes handler threads blocked in `recv`/`select` by closing their sockets: on Windows
   `shutdown()` alone does not wake them.
 - **Settings and tool guards (plan Task 4, done).** Interaction mode defaults to `background`
@@ -436,7 +482,18 @@ Selenium's JS "atoms" fail on Trident: `el.text`, `get_attribute`, `Select`. Use
 - A COM click is queued on the page's timer; when it closes its own window (a dialog's OK/Cancel
   button) the window can be gone before the result is read back, and reading `__iemcp_e` fails
   with "Member not found". `ComBackend._run` checks whether the IE server window is gone and
-  raises `WindowClosed`; `click` treats that as success.
+  raises `WindowClosed`; `click` treats that as success. The same race exists for a COM click on
+  a form's submit button: the page can navigate before the result is read back (seen once in
+  Task 13 as `it_read_interact.test_com_form_round_trip` failing with "Member not found", passing
+  on rerun; not fixed).
+- The capture proxy listens on `127.0.0.1` only (never a routable address) and the browser is
+  pointed at it with `<-loopback>` in `noProxy`; without that IE bypasses any proxy for loopback
+  hosts and the fixture site would never be captured. The browser's initial URL is the only
+  navigation it does not carry (D11), and a page the browser has fresh in its cache never
+  reaches it, so a navigation the proxy did not see proves nothing for the initial URL.
+- Native input without window focus loses about 1 click in 6 (D17): integration tests whose
+  next step needs a click's effect click again until the effect shows
+  (`it_network.click_until`).
 - A second driver `clear()` on the same field can fail with "JavaScript error clearing the
   element" (seen in Task 8; not yet explained).
 - Script dialogs are `#32770` windows owned by an `Alternate Modal Top Most` helper window (no

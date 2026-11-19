@@ -146,6 +146,7 @@ to run them, but it is notoriously awkward to automate:
 - **Grid extraction** (`ie_grid`) that heuristically finds the real data table and returns
   header-keyed rows.
 - **Screenshots** (full window or single element), JS execution, history navigation, resize.
+- **Network capture**: every request the IE-mode browser makes (navigations, form posts, frames, pop-ups, dialogs, XHR) is recorded by a local proxy that only the browser uses; `ie_network` / `ie_request` show them (see [Network capture](#network-capture)).
 - **One browser per MCP process**, with parallel agents isolated by session identity.
 - **Atomic per-session leases** prevent two processes from claiming the same explicit identity.
 - **Session-scoped logs and ownership records** under `%TEMP%\ie-mcp\sessions\<session-id>`;
@@ -187,12 +188,17 @@ All configuration is via environment variables — **all optional**:
 | `IE_CLICK_MODE` | `driver` | Default of `ie_click`'s `mode`: `driver` (a WebDriver click) or `async` (a script click queued with `setTimeout`; see `ie_click`). |
 | `IE_CLEAN_SESSION` | `0` | `1`/`true`/`yes` makes IEDriver clear the **whole** IE-mode cookie store and cache of the current user (not just this session's) when the session starts and ends. Off by default; turning it on logs you out of your own IE-mode sites. |
 | `IE_UPLOAD_DIR` | *(unset)* | Directory `ie_upload` may read from. Unset: uploads are disabled. A path must resolve inside it (relative paths are taken relative to it). |
-| `IE_CAPTURE_REDACT` | `1` | Redaction of secrets in the server log now, and in captured traffic and console records once capture lands. On unless set to `0`/`false`/`no`/`off` (a typo cannot turn it off). Field and header names are split into word segments (`lastName`, `compass`, `keyword` stay visible); password-like names match as substrings (`newpassword`, `USERPWD`). Every non-trivial value redacted once (4+ characters, not `true`/`on`/... or a short number) is masked as `<redacted>` wherever it appears again; values under 8 characters only as whole tokens. Each `Cookie`/`Set-Cookie` value is tracked, so a harmless cookie such as `theme=dark` also masks the word `dark` elsewhere. In free text, `name: value` lines are redacted only for secret header names (`Authorization`, `Cookie`, hyphenated ones like `X-Auth-Token`) and password-like or configured field names; `name=value` and JSON pairs use the full rules. |
+| `IE_CAPTURE_REDACT` | `1` | Redaction of secrets in the server log, in captured traffic and in console records. On unless set to `0`/`false`/`no`/`off` (a typo cannot turn it off). Field and header names are split into word segments (`lastName`, `compass`, `keyword` stay visible); password-like names match as substrings (`newpassword`, `USERPWD`). Every non-trivial value redacted once (4+ characters, not `true`/`on`/... or a short number) is masked as `<redacted>` wherever it appears again; values under 8 characters only as whole tokens. Each `Cookie`/`Set-Cookie` value is tracked, so a harmless cookie such as `theme=dark` also masks the word `dark` elsewhere. In free text, `name: value` lines are redacted only for secret header names (`Authorization`, `Cookie`, hyphenated ones like `X-Auth-Token`) and password-like or configured field names; `name=value` and JSON pairs use the full rules. |
 | `IE_CAPTURE_REDACT_FIELDS` | *(unset)* | Extra field names to redact, comma-separated, added to the built-in list (matched case-insensitively, whole name). |
 | `IE_CAPTURE_REDACT_HEADERS` | *(unset)* | Extra header names to redact, comma-separated, added to the built-in list. |
 | `IE_CAPTURE_MAX_BODY` | `262144` | Bytes kept of each captured request or response body; longer bodies are redacted in full, then cut and marked truncated. |
 | `IE_CAPTURE_JSONL` | `0` | `1`/`true`/`yes` also appends every captured exchange, after redaction, to a JSONL file. A value learned as secret only after a line was written is not masked in that earlier line (the in-memory store re-masks on read). |
 | `IE_INSTRUMENT` | `1` | Page instrumentation: the server puts a small ES3 script into the pages it drives (after each driver tool call, and into dialogs and attached tabs it reads over COM) that wraps `window.onerror`, `alert`/`confirm`/`prompt`, `showModalDialog`, `window.open` (and the page's own `console`, and native `XMLHttpRequest` on https pages) to record errors, dialogs, calls and console output for `ie_console`. Every wrapper calls the original with the caller's exact arguments and returns its value. `0`/`false`/`no`/`off` turns it all off (nothing is injected, nothing recorded, TaskDialogs are no longer accepted by `ie_dialog`). The full list is in the design spec's Fidelity table. |
+| `IE_CAPTURE` | `1` | Network capture: the IE-mode browser (only it; never the system or WinINet proxy settings) is pointed at a recording proxy the server starts on `127.0.0.1`. `ie_network`/`ie_request` read what it saw, and it inserts the instrumentation loader into HTML documents (with `IE_INSTRUMENT=1`). `0`/`false`/`no`/`off` turns the proxy off: no capture of document loads, posts or frames, no loader (only XHR the page instrumentation sees is recorded, as `source: page`). The proxy can move intranet hosts that normally bypass a proxy into another security zone; see [Network capture](#network-capture). |
+| `IE_CAPTURE_UPSTREAM_PROXY` | *(unset)* | `host:port` (or `http://host:port`) of a proxy the capture proxy forwards to, for networks that need one. Unset: direct. A malformed value does not stop the server: the next session start fails with an error naming this variable. |
+| `IE_CAPTURE_BYPASS` | *(unset)* | Comma-separated host patterns (`*.example.test`, `intranet`) kept off the capture proxy. Those hosts are not captured, get no loader, and their native XHR is not recorded. Use it for hosts that must keep their normal proxy bypass and so their security zone. |
+| `IE_CAPTURE_NO_CACHE` | `0` | `1`/`true`/`yes` strips conditional request headers (`If-Modified-Since`, `If-None-Match`) so cache revalidations become full fetches the proxy can see. Fresh cache hits stay invisible either way. |
+| `IE_KEEP_ARTIFACTS` | `0` | `1`/`true`/`yes` keeps the JSONL capture file (`IE_CAPTURE_JSONL=1`, `<session dir>\capture.jsonl`) when the server exits; by default it is deleted. Screenshots saved by name are always kept. |
 | `IE_CONSOLE_STUB` | `0` | `1`/`true`/`yes` creates a complete no-op `console` where a page has none (IE7 and quirks documents), so its `console.*` calls are recorded. Off by default: nothing is created that the page does not have. |
 | `IE_LOG_FILE` | `<session-dir>\ie-mcp.log` | Optional override for this session's log file. |
 | `IE_SESSION_ID` | `pid-<MCP process PID>` | Stable agent/session name. Different IDs can run concurrently; the same ID is exclusive. |
@@ -209,7 +215,7 @@ All configuration is via environment variables — **all optional**:
 |------|-------------|
 | `ie_open` | Start (or reuse) an Edge IE-mode session and navigate to a URL. |
 | `ie_goto` | Navigate the current session to a new URL. |
-| `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs, and the page modifications: `instrumented`, `console_stub`, `xhr_wrapped`). Never waits: while another call holds the browser it reports `"driver": "busy"` and leaves out title/url. |
+| `ie_status` | Session state as JSON (active/alive, title, url, owned PIDs, and the page modifications: `instrumented`, `console_stub`, `xhr_wrapped`; the network capture: `capture` = `proxy` / `page-only` / `off` / `unverified`, `capture_note`, `capture_internal_errors` and `capture_config_error` when there are any; and `modifications`, every change the harness currently makes to pages, requests and input, each with its off switch). Never waits: while another call holds the browser it reports `"driver": "busy"` and leaves out title/url. |
 | `ie_browsers` | List all Edge IE-mode windows + IEDriver processes, flagging the one this session owns. |
 | `ie_kill_orphans` | Terminate processes recorded for crashed sessions only (Edge profile and recorded image name + creation time must still match); never kills live-agent or unknown browsers. |
 | `ie_frames` | List the frames/iframes of the current page (index, name, id, src). |
@@ -224,6 +230,9 @@ All configuration is via environment variables — **all optional**:
 | `ie_close_window` | Close a pop-up or modal dialog by `hwnd:<n>` (`window.close()` over COM, else `WM_CLOSE`) or by driver handle. Refuses the main window (`ie_close`), an attached tab (`ie_detach`) and system dialogs. |
 | `ie_console` | Records the page instrumentation made, as JSON `{records, next_since_id}`: `error` (script errors), `dialog-open` / `dialog` (an `alert`/`confirm`/`prompt` when it opens and when it closed, with the result), `modal` (`showModalDialog` URL, features, `dialogArguments` and return value), `open` (`window.open`), `console` and `xhr` (native XHR on https pages). Each has `id`, `kind`, `level`, `time`, `text` and `where` (the window target and frame path). Arguments `since_id`, `kinds`, `limit`. Text is redacted. |
 | `ie_console_clear` | Forget every record `ie_console` holds. |
+| `ie_network` | List the HTTP requests the browser made (captured by the local proxy; plus native XHR the page instrumentation saw, `source: page`): one line per request, `id source method status duration_ms size url`, oldest first. Filters `url_contains`, `method`, `status`; page with `since_id` and `limit` (default 50). Needs no browser call, so it works while the page is busy. |
+| `ie_request` | One captured request in full: method, URL, status, timing, headers and bodies (charset from `Content-Type`, then the charset of the document that made the request, then cp1252; form bodies are percent-decoded the same way; gzip/deflate decoded from a copy; binary bodies as `<binary N bytes>`; `body_limit`, default 20000 characters). Secrets are redacted. An HTTPS entry is only a tunnel. |
+| `ie_network_clear` | Forget every captured request (ids keep counting). |
 | `ie_js` | Execute JavaScript in the page or a frame and return the result. |
 | `ie_screenshot` | PNG screenshot of the window, or of a single element. `save_path` must be a bare file name; it is saved in `<session dir>\screenshots\` and kept after `ie_close`. |
 | `ie_wait_text` | Poll until a substring appears (or disappears) in the page text. |
@@ -302,7 +311,8 @@ attached tab. Know its limits:
   call is running, and a closed dialog's document is gone.
 - `console` is wrapped only where the page already has one (documentMode 11 does, IE7 does not);
   `IE_CONSOLE_STUB=1` creates a no-op console where there is none. Native `XMLHttpRequest` is
-  wrapped on https pages (a proxy cannot read inside them) where the document has an `XMLHttpRequest.prototype` (not documentMode 7); ActiveX
+  wrapped on https pages (a proxy cannot read inside them), and on every page while capture is off
+  or found blind, where the document has an `XMLHttpRequest.prototype` (not documentMode 7); ActiveX
   `XMLHTTP` never is.
 - A pop-up's records go to its opener's queue when it is same-origin (marked `"popup": true`).
 - A TaskDialog (IE's form for a later dialog of a page; its message cannot be read from the
@@ -355,6 +365,42 @@ policy and assumes Edge is already configured for IE mode.
 
 ---
 
+### Network capture
+
+With `IE_CAPTURE=1` (the default) the server starts a recording proxy on `127.0.0.1` before the
+browser and points **only the browser process** at it (IEDriver's per-process proxy; your system
+and Internet Options proxy settings are never read or written, except that the Windows
+`ProxyOverride` list is read, read-only, for the notice below). `ie_network` lists what it saw and
+`ie_request` shows one request with headers and bodies. Captured: navigations, form posts, frames,
+pop-ups, `showModalDialog` windows and their XMLHTTP, and page XHR, all with bodies (redacted).
+
+Limits to know:
+
+- **The session's initial URL is not captured** (spike D11): the page `ie_open` starts the browser on
+  loads before the proxy applies. Everything the browser loads afterwards is.
+- **HTTPS shows only the tunnel** (host and timing), not the exchange.
+- **Fresh browser-cache hits are invisible** (no request is made). `IE_CAPTURE_NO_CACHE=1` turns
+  revalidations into full fetches, not fresh hits.
+- **Hosts in `IE_CAPTURE_BYPASS` are not captured**, get no loader and their native XHR is not recorded.
+
+Verification: `ie_status` reports `capture` as `unverified` until the first `ie_open`/`ie_goto` to an
+http(s) URL after the session was created. That call waits up to 5 s for the proxy to show the
+request: if it does, `capture` becomes `proxy`; if not the result carries `NOTICE: network capture is off: the browser did not use the proxy` and `capture` is `page-only` (the page instrumentation still records XHR).
+
+The proxy can change how a page behaves. Hosts that normally bypass your proxy (your Windows
+`ProxyOverride` list, or any dotless host when it lists `<local>`) are then handled as proxied
+hosts, and IE may put them in another security zone: a different document mode, Protected Mode or
+automatic logon. When that applies, `ie_open`/`ie_goto` add `NOTICE: <host> normally bypasses your
+proxy ...`. If a page behaves differently from your own browser, list its host in
+`IE_CAPTURE_BYPASS=<host>` (that host is then not captured) or turn the proxy off with
+`IE_CAPTURE=0`. Everything the harness modifies, each with its off switch, is in `ie_status`
+`modifications` and in the design spec's Fidelity table.
+
+Documents get a tiny loader `<script>` (so instrumentation runs before the page's own scripts);
+only with `IE_INSTRUMENT=1`, only into HTML documents requested as pages, never into fragments or
+XHR answers. Modified responses are marked `Cache-Control: no-store`, and requests that accept
+HTML are sent with `Accept-Encoding: identity`. `IE_INSTRUMENT=0` turns all of that off.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -404,8 +450,9 @@ Running straight from the clone without installing also works — `python -m ie_
 - `ie_mcp/protocol.py` — the stdio JSON-RPC loop and the `@tool` registry.
 - `ie_mcp/tools/` — one `t_*` function per tool, grouped in `navigation.py`, `read.py`,
   `interact.py`, `windows.py`, `dialogs.py`, `console.py` (the instrumentation hooks and
-  `ie_console`) and `diagnostics.py`.
+  `ie_console`), `network.py` (`ie_network`, `ie_request`, `ie_network_clear`) and `diagnostics.py`.
 - `ie_mcp/capture/console.py` — console, error and dialog records and their redacting store.
+- `ie_mcp/capture/proxy.py`, `store.py`, `redact.py`, `verify.py` — the recording proxy, the captured-request store, redaction, and the helpers that check the browser really uses the proxy.
 - `ie_mcp/js/` — the ES3 scripts injected into the page (`select.js`, `grid.js`,
   `ready_probe.js`, `instrument.js`, `hook.js`, `drain.js`).
 - `ie_mcp/cli.py` — the `--install`/`--selftest` CLI and the server start-up.

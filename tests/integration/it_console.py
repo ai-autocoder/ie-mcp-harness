@@ -49,6 +49,10 @@ class ConsoleTests(IntegrationTestCase):
 
     # -- tests ---------------------------------------------------------------
     def test_late_error_and_console_captured(self):
+        # A new browser, so errors.htm is its initial URL: the proxy never sees that one (spike
+        # D11) and no loader runs before its load-time error. (A page reached by navigation
+        # does get the loader: it_network.test_load_time_error_captured.)
+        self.restart_session()
         self.open_page("errors.htm")  # documentMode 11: has a console (D5)
         self.text("ie_click", by="id", value="late_error", wait=1)
         error = self.wait_record("error", "late-error")

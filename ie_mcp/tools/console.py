@@ -48,8 +48,8 @@ class _LiveRedactor:
 
 
 STORE = ConsoleStore(_LiveRedactor())
-# Where ``xhr`` records go as ``NetworkEntry(source="page")``: the session's CaptureStore once
-# Task 13 wires it; None until then (the record stays a console record only).
+# Where ``xhr`` records go as ``NetworkEntry(source="page")``. None (the default): the session's
+# own CaptureStore (``SESSION.store``); a test may point it at another store.
 NETWORK_STORE = None
 
 _state_lock = threading.Lock()
@@ -66,12 +66,11 @@ def page_flags():
     """The flags ``instrument.js`` reads: the console stub and the XHR wrapper.
 
     ``wrap_xhr`` is true when the proxy cannot see the page's requests: capture is off
-    (``IE_CAPTURE=0``, a setting Task 13 adds) or the session found the proxy blind
-    (``capture_active is False``). Spike D3 = proxy, so there is no "instrument-only" case.
+    (``IE_CAPTURE=0``) or the session found the proxy blind (``capture_active is False``).
+    Spike D3 = proxy, so there is no "instrument-only" case.
     """
     settings = config.SETTINGS
-    wrap = (getattr(settings, "capture", True) is False
-            or getattr(SESSION, "capture_active", None) is False)
+    wrap = not settings.capture or SESSION.capture_active is False
     return {"stub": bool(settings.console_stub), "wrap_xhr": bool(wrap)}
 
 
@@ -130,7 +129,7 @@ def ingest_state(raw, where):
             records.append(rec)
     if not records:
         return [], open_dialogs
-    network = NETWORK_STORE
+    network = NETWORK_STORE if NETWORK_STORE is not None else SESSION.store
     if network is not None:
         for rec in records:
             if rec.kind != "xhr":

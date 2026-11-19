@@ -138,10 +138,12 @@ class WatchdogTests(WatchdogTestCase):
         config.SETTINGS = dataclasses.replace(config.SETTINGS, tool_timeout=1, attach_retries=3)
         budget = lambda name, args=None: protocol.call_budget(protocol.REGISTRY[name], args or {})
 
-        self.assertEqual(budget("ie_open", {"wait": 4}), 3 * 75 + 4 + 15)
-        self.assertEqual(budget("ie_open"), 3 * 75 + 4 + 15)
-        self.assertEqual(budget("ie_goto", {"wait": 10}), 3 * 75 + 10 + 15)
-        self.assertEqual(budget("ie_goto"), 3 * 75 + 3 + 15)
+        # ie_open/ie_goto also wait up to session.VERIFY_WAIT (5 s) for the proxy to show the
+        # navigation (Task 13).
+        self.assertEqual(budget("ie_open", {"wait": 4}), 3 * 75 + 4 + 15 + 5)
+        self.assertEqual(budget("ie_open"), 3 * 75 + 4 + 15 + 5)
+        self.assertEqual(budget("ie_goto", {"wait": 10}), 3 * 75 + 10 + 15 + 5)
+        self.assertEqual(budget("ie_goto"), 3 * 75 + 3 + 15 + 5)
         self.assertEqual(budget("ie_wait_ready", {"timeout": 100, "interval": 5}), 120)
         self.assertEqual(budget("ie_wait_text", {"timeout": 100, "interval": 5}), 120)
         self.assertEqual(budget("ie_wait_element", {"timeout": 100, "interval": 5}), 120)
