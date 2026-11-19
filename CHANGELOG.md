@@ -3,7 +3,9 @@
 This project is a fork of [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT). `0.1.0` is
 upstream's last release before the fork.
 
-## 0.2.0
+## 1.0.0 — 2026-11-19
+
+First release of the fork.
 
 The harness: full access to an IE-mode page without changing how it behaves.
 

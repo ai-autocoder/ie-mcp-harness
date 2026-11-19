@@ -17,12 +17,12 @@ import traceback
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from ie_mcp import backends, config
+from ie_mcp import __version__, backends, config
 from ie_mcp.session import DRIVER_LOCK, log
 from ie_mcp.win32 import htmldoc, windows
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "ie-mcp", "version": "0.2.0"}
+SERVER_INFO = {"name": "ie-mcp", "version": __version__}
 SERVER_INSTRUCTIONS = (
     "IE interaction mode is selected when this MCP process starts. "
     "IE_INTERACTION_MODE=background is the default and suits automation on a user's active "

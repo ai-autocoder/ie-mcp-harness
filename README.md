@@ -4,8 +4,8 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
 [![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
-[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
-[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
+[![Status: stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](CHANGELOG.md)
+[![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
 
 **Give an LLM the ability to drive a legacy IE-only web application.**
 
@@ -17,10 +17,10 @@
 > console and dialog records, window screenshots). The package and the command are still called
 > `ie-mcp`. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
-> ⚠️ **Status: alpha / work in progress.** This project is under active development.
-> The tool surface and configuration may change between versions, and breaking changes
-> can land without notice until `1.0.0`. Issues and PRs welcome — see
-> [Development](#development) and [Roadmap](#roadmap).
+> **Status: `1.0.0`, the first stable release.** From here on, versions follow
+> [semantic versioning](https://semver.org/): a tool, argument or setting is removed or changes
+> meaning only in a new major version. See [CHANGELOG.md](CHANGELOG.md). Issues and PRs
+> welcome — see [Development](#development) and [Roadmap](#roadmap).
 
 `ie-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io/) server that
 automates **Microsoft Edge in IE mode** (the Trident / legacy document-mode engine) via
@@ -740,14 +740,13 @@ Bug reports and PRs are welcome. Please:
 
 ## Roadmap
 
-Planned / in progress (subject to change while in alpha):
+Ideas for later releases (not promised):
 
-- [ ] Multi-tab / multiple window-handle support.
 - [ ] Cookie and `localStorage` inspection tools.
 - [ ] Richer `ie_grid` (pagination + virtualized-grid scrolling helpers).
 - [ ] Optional structured (JSON) tool results alongside text.
 - [ ] Configurable per-tool default waits.
-- [ ] Packaged release + versioned tags once the tool surface stabilizes (`1.0.0`).
+- [ ] Cancellable `ie_sleep` and `wait=` pauses.
 
 ---
 
