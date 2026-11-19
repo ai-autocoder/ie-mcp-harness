@@ -226,7 +226,8 @@ class TargetTests(BackendTestCase):
         self.assertIn("target", self.text_of(result))
 
     def test_other_tools_are_not_target_aware(self):
-        for name in ("ie_open", "ie_screenshot", "ie_wait_ready", "ie_upload"):
+        # ie_screenshot gained its own hwnd-only target in Task 14 (tests/test_capture.py).
+        for name in ("ie_open", "ie_wait_ready", "ie_upload"):
             self.assertNotIn("target", protocol.REGISTRY[name].input_schema["properties"], name)
 
 

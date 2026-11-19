@@ -19,6 +19,7 @@ PROMPT_EDIT_CONTROL_ID = 8133  # D14: a #32770 with an Edit child of this ID is 
 OWNER_CHAIN_LIMIT = 16  # owner chains are one to three deep in practice; this only stops loops
 MODAL_KINDS = ("html_dialog", "script_dialog", "system_dialog")
 GW_OWNER = 4
+GA_ROOT = 2
 
 # Top-level hwnds of attached tabs (plan Task 15 fills it). For an attached tab only windows
 # whose owner chain reaches one of these count, never the rest of the user's Edge process tree.
@@ -99,6 +100,8 @@ def _user32():
         u.GetParent.restype = wintypes.HWND
         u.GetDlgCtrlID.argtypes = [wintypes.HWND]
         u.GetDlgCtrlID.restype = ctypes.c_int
+        u.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        u.GetAncestor.restype = wintypes.HWND
         _user32_api = u
     return _user32_api
 
@@ -115,6 +118,25 @@ def class_name(hwnd):
 def is_visible(hwnd):
     u = _user32()
     return bool(u and u.IsWindowVisible(hwnd))
+
+
+def window_pid(hwnd):
+    """The process id that owns ``hwnd``, or None when it is not a window (read-only)."""
+    u = _user32()
+    if u is None:
+        return None
+    pid = wintypes.DWORD()
+    return int(pid.value) if u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)) else None
+
+
+def root_window(hwnd):
+    """The top-level window above ``hwnd`` (``GetAncestor(GA_ROOT)``; ``hwnd`` itself if it is one).
+
+    0 when ``hwnd`` is not a window. A tab's ``Internet Explorer_Server`` window resolves to
+    the browser window that holds it. Read-only: nothing is sent to any window.
+    """
+    u = _user32()
+    return int(u.GetAncestor(hwnd, GA_ROOT) or 0) if u else 0
 
 
 def _window_text(u, hwnd):

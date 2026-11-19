@@ -8,6 +8,7 @@ from ie_mcp import config
 from ie_mcp import tools  # noqa: F401  (registers every tool)
 from ie_mcp.protocol import serve
 from ie_mcp.session import SESSION, acquire_lock, ensure_ie_policies, log
+from ie_mcp.win32 import capture
 
 
 def selftest():
@@ -98,6 +99,9 @@ def install(remove=False):
 
 
 def main():
+    # Before any window call (modal probe, enumeration, capture): GetWindowRect and PrintWindow
+    # only agree on a scaled display once the process is DPI aware, and it cannot be set later.
+    capture.enable_dpi_awareness()
     if "--selftest" in sys.argv:
         sys.exit(selftest())
     if "--install" in sys.argv:

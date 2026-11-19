@@ -113,8 +113,7 @@ asserts it, and `ie_browsers` shows what is running.
 ## Architecture
 
 Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the package below.
-Modules the later tasks add (`png.py`, `win32/capture.py`, `capture/`, further `tools/`
-modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
+Modules the later tasks add (further `tools/` modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
 `win32/windows.py` and `win32/htmldoc.py` exist (Task 7); `backends.py`, the `com_*.js`
 scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
 `win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
@@ -122,7 +121,8 @@ exist (Task 9); `capture/store.py` and `capture/redact.py` exist, and `session.l
 through `session.REDACTOR` (Task 10); `capture/proxy.py` exists (Task 11);
 `capture/console.py`, `tools/console.py` and `js/instrument.js`, `hook.js`, `drain.js` exist
 (Task 12); `capture/verify.py` and `tools/network.py` exist, and the proxy is wired into the
-session (Task 13). Keep this section in sync with the plan and the code.
+session (Task 13); `png.py` and `win32/capture.py` exist, and `cli.main()` makes the process
+per-monitor DPI aware first (Task 14). Keep this section in sync with the plan and the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
 `from ie_mcp.config import SETTINGS`), so tests can replace it. Tools register themselves with
@@ -138,7 +138,7 @@ ie_mcp/
   session.py         IeSession, build_options, SessionLease, process tracking/cleanup, DRIVER_LOCK (plain Lock)
   backends.py        Backend interface; DriverBackend (Selenium), ComBackend (COM); target_kind, resolve_backend,
                      DEFAULT_TARGET, ATTACHED_CHAINS, TAB_ANCESTOR_CLASS (None: D15 = ie-server), js_literal
-  png.py             encode_png (stdlib zlib)
+  png.py             encode_png (stdlib zlib/struct, 8-bit RGBA, filter 0)
   win32/
     processes.py     process_identity (image + creation time), snapshot (2 s cache; fresh=True skips it), process_tree
     windows.py       ctypes only: enumerate_windows, classify, modal_probe (visible windows only, no COM), session_window_pids,
@@ -147,7 +147,8 @@ ie_mcp/
     messages.py      the only module that posts window messages (post_message, WM_COMMAND/WM_CLOSE) + is_window, get_text (ctypes)
     dialogs.py       the safety gate: confirm_script_dialog (session window + helper/dialog-frame owner + exact direct-child
                      shape), the Q8 shape tables, post_command, wait_gone; review this file alone (no tool code)
-    capture.py       PrintWindow capture, DPI awareness
+    capture.py       enable_dpi_awareness (SetProcessDpiAwarenessContext(-4), once in cli.main), capture_window
+                     (PrintWindow PW_RENDERFULLCONTENT into a 32-bit DIB section, BGRA->RGBA, GDI freed in finally)
   capture/
     store.py         NetworkEntry, CaptureStore
     redact.py        Redactor (name-segment matching, value masking)
@@ -342,6 +343,17 @@ the upstream code behaves as before:
   discovery in the per-user Selenium cache (`config.discover_driver_path`, win32 first). `ie_upload`
   works only with `IE_UPLOAD_DIR` set and only on files that `Path.resolve()` places inside it.
   `ie_screenshot` `save_path` is a bare file name saved in `<session dir>/screenshots/` and kept.
+- **Window screenshots (plan Task 14, done).** `ie_screenshot scope=window` (`needs_driver=False`,
+  also for any `target`; default scope: window with a target, element with `value`, else page)
+  captures with `win32/capture.capture_window`: the main window (`SESSION.main_hwnd`, or the
+  root of the `tab:` `DEFAULT_TARGET` through `backends.default_tab_hwnd`), then every visible
+  session `html_dialog`/`script_dialog` bottom-most to top-most, one image each, plus a text item
+  listing them. Main and attached tops are captured only while `IsWindow` holds and their PID is
+  a session PID (attached tops: in `ATTACHED_TOPS`), so a recycled stale hwnd is refused.
+  `target` accepts only `hwnd:<n>` of a window `enumerate_windows` lists for the session. System
+  dialogs are listed, never captured; a minimized window is reported, never restored; nothing
+  is posted to any window. Several images save as `name`, `name-2`, ... (each name validated
+  before the first capture); a failed file write is reported and the image still returned.
   `ie_text` falls back to `document.body.innerText`; `ie_frames` reads `name`/`id`/`src` with
   `js/frames.js`. `ie_open` needs an http(s) URL in IE mode.
 - **Session lifecycle (plan Task 5, done).** `session.kill_verified` is the only kill path

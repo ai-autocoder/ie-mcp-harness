@@ -3,10 +3,12 @@ import json
 import re
 from pathlib import PureWindowsPath
 
-from ie_mcp import config, js
+from ie_mcp import backends, config, js, png
 from ie_mcp.backends import TARGET_SCHEMA, resolve_backend, uses_driver
 from ie_mcp.protocol import image_result, locator_budget, text_result, tool, wait_budget
 from ie_mcp.session import SESSION, Cancelled, log
+from ie_mcp.tools.windows import parse_hwnd
+from ie_mcp.win32 import capture, messages, windows
 
 # Defaults of the wait tools; each watchdog budget is computed from the same values.
 WAIT_TEXT_TIMEOUT, WAIT_TEXT_INTERVAL = 45, 2
@@ -169,14 +171,202 @@ def _screenshot_target(name):
     return folder / text
 
 
+SCREENSHOT_SCOPES = ("page", "element", "window")
+# Kinds a window screenshot may capture. A system dialog is never captured (CLAUDE.md safety
+# rules: it can show credentials or file paths); "other" windows are neither pages nor dialogs.
+CAPTURE_KINDS = ("main", "popup", "html_dialog", "script_dialog")
+DIALOG_KINDS = ("html_dialog", "script_dialog")
+
+
+def _screenshot_scope(args):
+    """The scope of an ``ie_screenshot`` call; ValueError for a contradictory request.
+
+    Default: ``window`` when a ``target`` is given, else ``element`` when ``value`` is given
+    (upstream's behaviour), else ``page``. Nothing here touches the browser.
+    """
+    scope = args.get("scope")
+    has_target = args.get("target") not in (None, "")
+    has_locator = bool(args.get("by") or args.get("value"))
+    if scope is None:
+        scope = "window" if has_target else ("element" if has_locator else "page")
+    if scope not in SCREENSHOT_SCOPES:
+        raise ValueError(f"scope must be one of {', '.join(SCREENSHOT_SCOPES)}, not {scope!r}")
+    if has_target and scope != "window":
+        raise ValueError("target only applies to scope=window")
+    if scope == "element" and not (args.get("by") and args.get("value")):
+        raise ValueError("scope=element needs by and value")
+    if scope != "element" and has_locator:
+        raise ValueError(f"by/value only apply to scope=element, not scope={scope}")
+    return scope
+
+
+def _screenshot_needs_driver(args):
+    """Page and element shots drive the browser; window shots (and bad requests) do not."""
+    try:
+        return _screenshot_scope(args) != "window"
+    except ValueError:
+        return False
+
+
+def _numbered_name(name, number):
+    """The save_path of image ``number`` (1-based): the given name, then ``<stem>-<n><suffix>``."""
+    if number == 1:
+        return name
+    path = PureWindowsPath(name)
+    return f"{path.stem}-{number}{path.suffix}"
+
+
+def _describe(hwnd, kind, cls, title):
+    shown = (title[:60] + "...") if len(title) > 60 else title
+    return f"hwnd:{hwnd} {kind} class={cls} title={shown!r}"
+
+
+def _live_tops(pids):
+    """The session's main window and attached top windows that still belong to it.
+
+    ``SESSION.main_hwnd`` is recorded once and can outlive the browser (Edge killed from
+    outside), and Windows recycles hwnd numbers: a stale value could name an unrelated
+    window, which must never be captured. A top counts only while it is a window and, for the
+    main window, its process is one of the session's (attached tops are the ones the attach
+    tools recorded in ``ATTACHED_TOPS``).
+    """
+    attached = {h for h in windows.ATTACHED_TOPS if messages.is_window(h)}
+    main = SESSION.main_hwnd
+    if main is not None and messages.is_window(main) and windows.window_pid(main) in pids:
+        attached.add(main)
+    return attached
+
+
+def _main_capture_window(pids, tops):
+    """The window a window screenshot starts with (an hwnd), or a RuntimeError.
+
+    ``SESSION.main_hwnd``; while ``backends.DEFAULT_TARGET`` is an attached ``tab:<n>``, that
+    tab's top-level browser window (``GetAncestor``) instead, because the session's own main
+    window is then not the page being worked on. Either must still be a live session window.
+    """
+    number = backends.default_tab_hwnd()
+    if number is not None:
+        top = windows.root_window(number)
+        if not top or top not in tops or top not in windows.ATTACHED_TOPS:
+            raise RuntimeError(f"the attached tab {number} is gone: call ie_tabs and ie_attach again")
+        return top
+    if SESSION.main_hwnd is None:
+        raise RuntimeError("no session window: call ie_open first")
+    if SESSION.main_hwnd not in tops:
+        raise RuntimeError("the session window is gone: call ie_close, then ie_open again")
+    return SESSION.main_hwnd
+
+
+def _plan_window_shots(target):
+    """``(shots, notes)``: windows to capture, bottom-most first, and windows only listed.
+
+    A shot is ``(hwnd, kind, cls, title)``. Only windows that ``enumerate_windows`` lists for
+    this session, or its main/attached top window, are ever planned; a system dialog never is.
+    """
+    pids = windows.session_window_pids()
+    infos = windows.enumerate_windows(pids, attached_tops=set(windows.ATTACHED_TOPS))
+    tops = _live_tops(pids)
+    by_hwnd = {w.hwnd: w for w in infos}
+
+    def shot_of(hwnd):
+        info = by_hwnd.get(hwnd)
+        if info is None:  # the main/attached top is not always in the listing
+            return (hwnd, "main", windows.class_name(hwnd), "")
+        return (hwnd, info.kind, info.cls, info.title)
+
+    if target not in (None, ""):
+        hwnd = parse_hwnd(target)  # only hwnd:<n>; anything else is refused here
+        info = by_hwnd.get(hwnd)
+        if info is not None and info.kind == "system_dialog":
+            raise ValueError(f"hwnd:{hwnd} is a system dialog: never captured; tell the user")
+        listed = info is not None and info.kind in CAPTURE_KINDS and (
+            info.visible or info.kind not in DIALOG_KINDS)
+        if not listed and hwnd not in tops:
+            raise ValueError(f"hwnd:{hwnd} is not a window of this session (see ie_windows)")
+        return [shot_of(hwnd)], []
+
+    main = _main_capture_window(pids, tops)
+    shots, notes = [shot_of(main)], []
+    # EnumWindows lists the top-most window first: reverse it, so the last image is frontmost.
+    for info in reversed(infos):
+        if info.hwnd != main and info.kind in DIALOG_KINDS and info.visible:
+            shots.append(shot_of(info.hwnd))
+    for info in infos:
+        if info.kind == "system_dialog" and info.visible:
+            notes.append(f"{_describe(info.hwnd, info.kind, info.cls, info.title)}: not captured "
+                         "(system dialogs are never captured; tell the user)")
+    return shots, notes
+
+
+def _window_screenshot(args):
+    """``ie_screenshot scope=window``: a text listing, then one PNG per captured window."""
+    name = args.get("save_path", "") if "save_path" in args else None
+    if "save_path" in args and not isinstance(name, str):
+        name = ""  # an explicit null is as wrong as an empty string: _screenshot_target refuses it
+    shots, notes = _plan_window_shots(args.get("target"))
+    live = []
+    for shot in shots:
+        if capture.is_minimized(shot[0]):  # never restored: that would move the user's windows
+            notes.append(f"{_describe(*shot)}: minimized, not captured")
+        else:
+            live.append(shot)
+    # Validate every file name before the first capture: a bad name fails without side effects.
+    paths = ([_screenshot_target(_numbered_name(name, k)) for k in range(1, len(live) + 1)]
+             if name is not None else [None] * len(live))
+    images, lines, failures = [], [], []
+    for shot, path in zip(live, paths):
+        try:
+            width, height, rgba = capture.capture_window(shot[0])
+            data = png.encode_png(width, height, rgba)
+        except Exception as exc:
+            failures.append(f"{_describe(*shot)}: capture failed: {exc}")
+            continue
+        images.append(data)
+        saved = ""
+        if path is not None:
+            # A write error is not a capture error: the image exists and is still returned.
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(data)
+                log(f"screenshot: saved {path}")
+                saved = f" -> {path}"
+            except OSError as exc:
+                failures.append(f"{_describe(*shot)}: could not save {path}: {exc}")
+        lines.append(f"image {len(images)}: {_describe(*shot)} {width}x{height}{saved}")
+    listing = "\n".join(
+        [f"{len(images)} window image(s), bottom-most window first; the last is frontmost"]
+        + lines + failures + notes)
+    if not images:
+        raise RuntimeError("no window could be captured\n" + listing)
+    log(f"screenshot: window scope, {len(images)} image(s)")
+    if args.get("no_inline"):
+        return text_result(listing)
+    return {"content": [{"type": "text", "text": listing}]
+            + [image_result(data)["content"][0] for data in images]}
+
+
 @tool(
     "ie_screenshot",
-    "Capture a PNG screenshot of the IE-mode window, or of a single element if "
-    "by/value are given (returned as an image). save_path, a bare file name, also saves it "
-    "in the session's screenshots folder; saved files are kept after ie_close.",
+    "Capture PNG screenshots. scope=page (default) is the driver's view of the page; scope="
+    "element (by/value, the default when value is given) one element; scope=window renders the "
+    "session's windows as the user sees them with PrintWindow: first the main window (or the "
+    "attached tab's browser window), then every open modal HTML dialog and script alert/confirm/"
+    "prompt, bottom-most to top-most, one image each, plus a text item that lists them (a system "
+    "dialog is listed, never captured; a minimized window is reported, not restored). Window "
+    "shots need no driver, so they work while a dialog blocks the page; target=hwnd:<n> (from "
+    "ie_windows) captures that one window of this session only. A window IE paints itself can "
+    "come out blank: say so rather than guess. save_path, a bare file name, also saves it in "
+    "the session's screenshots folder (several images: name, name-2, name-3, ...); saved files "
+    "are kept after ie_close.",
     {
         "type": "object",
         "properties": {
+            "scope": {"type": "string", "enum": ["page", "element", "window"],
+                      "description": "page, element or window (default: window with a target, "
+                                     "element with value, else page)"},
+            "target": {"type": "string",
+                       "description": "scope=window only: hwnd:<n>, one window of this session "
+                                      "(from ie_windows or a NOTICE); no other form is accepted"},
             "save_path": {"type": "string", "description": "bare file name, e.g. shot.png; omit it to not save (an empty string is an error)"},
             "no_inline": {"type": "boolean", "description": "return confirmation text instead of the image blob"},
             "by": {"type": "string", "description": "element locator type (for element screenshot)"},
@@ -185,34 +375,37 @@ def _screenshot_target(name):
             "timeout": {"type": "number", "description": "seconds to wait for the element (default 10)"},
         },
     },
+    needs_driver=_screenshot_needs_driver,
     budget=locator_budget(),
 )
 def t_screenshot(args):
-    # Validate before touching the browser: a bad name must fail without side effects.
+    # Validate before touching the browser: a bad request or name must fail without side effects.
+    scope = _screenshot_scope(args)
+    if scope == "window":
+        return _window_screenshot(args)
     target = _screenshot_target(args["save_path"]) if "save_path" in args else None
     d = SESSION.ensure()
-    if args.get("value"):
-        # element-scoped screenshot
+    if scope == "element":
         el = SESSION.find(args["by"], args["value"], args.get("frame"), args.get("timeout", 10))
         log("screenshot: capturing element")
-        png = el.screenshot_as_png
+        png_bytes = el.screenshot_as_png
     else:
         try:
             d.switch_to.default_content()  # window screenshots from the top doc
         except Exception:
             pass
         log("screenshot: capturing")
-        png = d.get_screenshot_as_png()
-    log(f"screenshot: got {len(png)} bytes")
+        png_bytes = d.get_screenshot_as_png()
+    log(f"screenshot: got {len(png_bytes)} bytes")
     if target is not None:
         with open(target, "wb") as fh:
-            fh.write(png)
+            fh.write(png_bytes)
         log(f"screenshot: saved {target}")
     if args.get("no_inline"):
         # avoid returning a giant base64 blob; just confirm + path
-        return text_result(f"screenshot saved ({len(png)} bytes)"
+        return text_result(f"screenshot saved ({len(png_bytes)} bytes)"
                            + (f" -> {target}" if target is not None else ""))
-    return image_result(png)
+    return image_result(png_bytes)
 
 
 @tool(

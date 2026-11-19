@@ -17,6 +17,7 @@ import unittest
 import ie_mcp.tools  # noqa: F401  (importing the package registers every tool)
 from ie_mcp import config, protocol
 from ie_mcp.session import SESSION, _same_process, kill_verified
+from ie_mcp.win32 import capture
 from ie_mcp_fixtures import start_fixture_server
 
 
@@ -53,6 +54,18 @@ def finish_session(recorded):
     return problems
 
 
+_DPI_DONE = False
+
+
+def _enable_dpi_awareness_once():
+    """The server does this in ``cli.main``; the test process must too, once, so that
+    ``GetWindowRect`` (the tests' expected sizes) and ``PrintWindow`` agree."""
+    global _DPI_DONE
+    if not _DPI_DONE:
+        _DPI_DONE = True
+        capture.enable_dpi_awareness()
+
+
 class IntegrationTestCase(unittest.TestCase):
     fixture = None
     base_url = None
@@ -62,6 +75,7 @@ class IntegrationTestCase(unittest.TestCase):
     def setUpClass(cls):
         if os.environ.get("IE_MCP_INTEGRATION") != "1":
             raise unittest.SkipTest("integration test: run it with scripts/run_integration.py")
+        _enable_dpi_awareness_once()
         host = os.environ.get("IE_FIXTURE_HOST") or "127.0.0.1"
         cls.recorded_processes = []
         cls.fixture = start_fixture_server(host)

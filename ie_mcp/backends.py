@@ -80,6 +80,12 @@ def _parse_target(target):
     raise ValueError(f"unknown target {target!r}: use driver, hwnd:<n> or tab:<n>")
 
 
+def default_tab_hwnd():
+    """The number of the attached tab that ``DEFAULT_TARGET`` names, or None (no tab default)."""
+    kind, number = _parse_target(None)
+    return number if kind == "tab" else None
+
+
 def target_kind(target):
     """``"driver"``, ``"hwnd"`` or ``"tab"``; ValueError for any other form."""
     return _parse_target(target)[0]
