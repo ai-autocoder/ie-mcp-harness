@@ -1,0 +1,16 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+<title>Fixture leave</title>
+<script type="text/javascript">
+// A page with unsaved input: leaving it raises IE's own "leave this page?" prompt.
+window.onbeforeunload = function () { return 'The draft is not saved.'; };
+function leaveSoon() { setTimeout(function () { window.location.href = 'index.htm'; }, 300); }
+</script>
+</head>
+<body>
+<h3>Leave</h3>
+<p><label for="draft">Draft</label> <input type="text" id="draft" name="draft" value=""></p>
+<p><input type="button" id="do_leave" name="do_leave" value="Leave" onclick="leaveSoon()"></p>
+</body>
+</html>

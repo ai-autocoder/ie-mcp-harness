@@ -9,8 +9,9 @@ IE-only web applications** running in **Microsoft Edge IE mode** (the Trident en
 the official Selenium **IEDriverServer**.
 
 This repository is a **fork** of [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT),
-cloned at upstream commit `e0937ff6f1bfb51b13c72310084af3fd17d062b0`. The upstream remote is
-named `upstream`; there is no `origin` until a fork is created on a hosting service. Development
+cloned at upstream commit `e0937ff6f1bfb51b13c72310084af3fd17d062b0`. The remote `origin` is
+the fork, `github.com/ai-autocoder/ie-mcp-harness`. Upstream has no local remote; add it when
+needed with `git remote add upstream https://github.com/thomfilg/ie-mcp.git`. Development
 happens on the `harness` branch.
 
 The fork's goal: give an agent **full access** to an IE-mode page, on par with what a
@@ -187,7 +188,12 @@ Key design points:
   `ie_fill`, `ie_select`, `ie_get`, `ie_frames`, `ie_wait_element`, `ie_wait_text`, `ie_grid`,
   `ie_scroll`, `ie_press_key` and `ie_hover` take an optional `target`: omitted (or
   `backends.DEFAULT_TARGET`, set by Task 15) is the driver; `hwnd:<n>` and `tab:<n>` act over
-  COM and have `needs_driver` False. Over COM every DOM access is script (D7): the request runs
+  COM and have `needs_driver` False. `backends.check_target` (called by `resolve_backend`, so
+  also by the AFTER_CALL drain) refuses, Win32 only and before any COM call, a target that is
+  not a window of this session ("not a window of this session"): `hwnd:<n>` must have a
+  top-level window that `windows.find_window` lists or that is an attached top; `tab:<n>` may
+  also be the attached tab or a tab `ie_mode_tabs(with_url=False)` lists (other live sessions
+  excluded), and an unattached user tab sets `attach.USED` (Fidelity row). Over COM every DOM access is script (D7): the request runs
   as `new Function(S)` inside `execScript`, a frame path is resolved in script and run in the
   frame window, results come back through the window expandos `__iemcp_r`/`__iemcp_e` (cleared
   again after each read), element handles carry their locator and are re-resolved in each
@@ -235,7 +241,8 @@ Key design points:
   because IEDriver lists a new window late. `ie_close_window`: `hwnd:<n>` closes over COM
   (`ComBackend.close_window`, `parentWindow.close()`), else `WM_CLOSE`; a driver handle is
   switched to, closed, and the driver goes back to main; main, attached tops and system dialogs
-  are refused. **Never send a message to a `#32770` that `win32/dialogs.confirm_script_dialog` has
+  are refused, and so is every pop-up while `SESSION.main_hwnd` is None (the main window would
+  classify as a pop-up). **Never send a message to a `#32770` that `win32/dialogs.confirm_script_dialog` has
   not proven:** it must be a `script_dialog` of the session (owner chain), visible, a `#32770`,
   have an IMMEDIATE owner of class `Alternate Modal Top Most` (in the session PIDs) or
   `Internet Explorer_TridentDlgFrame` (D6/Q8; a system dialog is owned by the browser's top window),
@@ -255,7 +262,10 @@ Key design points:
   Messages are posted (never sent) through `win32/messages.py`. `ie_dialog` is `needs_driver=lambda a: a.get("target") is None`;
   a target other than `hwnd:<n>` is refused before the lock. Without a target it tries the
   driver alert, but skips it while a modal HTML dialog is open (a driver call can block) and
-  answers an owned alert/confirm window instead; a prompt is answered only by the driver alert
+  answers an owned alert/confirm window instead. Before a driver `accept`/`sendkeys` every open
+  non-prompt script dialog must pass `confirm_script_dialog`, and when one is a TaskDialog the
+  same evidence gate applies (several dialogs with a TaskDialog among them: refused, use a
+  target; a failed modal probe: refused); a prompt is answered only by the driver alert
   (`dialogs.PROMPT_DRIVER_REACH` records D14), so a prompt inside a modal dialog gets "prompt not
   reachable: ask the user". Without a session `ie_dialog` no longer starts a browser.
 - **Post-call instrumentation** is one `execute_script` (`js/hook.js`, `tools/console.py`

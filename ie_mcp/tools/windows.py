@@ -283,6 +283,10 @@ def _close_hwnd(hwnd):
                             "closed": scriptdialogs.wait_gone(hwnd)})
     if window.kind not in ("popup", "html_dialog"):
         return tool_error(f"hwnd:{hwnd} is not a pop-up or dialog window ({window.kind})")
+    if window.kind == "popup" and SESSION.main_hwnd is None:
+        # Without a known main window, the main window itself classifies as a pop-up (R5).
+        return tool_error("cannot tell which is the main window, so no page window is closed "
+                          "this way (use ie_close, or close the pop-up from its page)")
     via = "com"
     try:
         backends.resolve_backend(f"hwnd:{hwnd}").close_window()

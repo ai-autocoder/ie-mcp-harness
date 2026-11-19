@@ -561,6 +561,21 @@ class VerificationTests(SessionStateTestCase):
         self.assertIs(SESSION.capture_active, True)
         self.assertEqual(driver.got, ["http://h.example/a"])
 
+    def test_a_wait_that_is_not_a_number_is_sanitised_after_the_navigation(self):
+        # The budget already used number_arg; the pause must too, or wait: "3" raised a
+        # TypeError after a navigation that worked.
+        driver = self.use_driver()
+        driver.back = driver.forward = lambda: None
+        self.use_proxy(seen=["http://h.example/a", "http://h.example/b"])
+        fake_time = mock.Mock()
+        self.patch(navigation, "time", fake_time)
+        for result in (navigation.t_open({"url": "http://h.example/a", "wait": "1"}),
+                       navigation.t_goto({"url": "http://h.example/b", "wait": "soon"}),
+                       navigation.t_back({"wait": True}), navigation.t_forward({"wait": -1})):
+            self.assertFalse(result.get("isError"), result)
+        self.assertEqual([c.args[0] for c in fake_time.sleep.call_args_list],
+                         [1.0, navigation.GOTO_WAIT, 2.0, 2.0])
+
     def test_open_and_goto_budgets_include_the_verification_wait(self):
         self.patch(session, "VERIFY_WAIT", 5)
         for name, wait in (("ie_open", navigation.OPEN_WAIT), ("ie_goto", navigation.GOTO_WAIT)):

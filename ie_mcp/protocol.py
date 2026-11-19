@@ -473,8 +473,9 @@ def run_tool(spec, args):
         attached = backends.attached_tab()
         if attached is not None:
             # Before the lock and before any worker: such a call must never start a browser.
-            return _error_result(f"attached to tab {attached}: this tool needs the driver "
-                                 "session; call ie_detach first")
+            return _with_notices(_error_result(
+                f"attached to tab {attached}: this tool needs the driver session; call "
+                "ie_detach first"), _probe())
     hold = None
     if wants_driver:
         hold = _take_driver(spec.name, budget)

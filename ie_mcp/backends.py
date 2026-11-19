@@ -153,11 +153,41 @@ def uses_driver(args):
     return target_kind(args.get("target")) == "driver"
 
 
+def check_target(kind, hwnd):
+    """Refuse (ValueError) a ``hwnd:``/``tab:`` target that is not a window of this session.
+
+    Win32 only, before any COM call (the AFTER_CALL drain resolves through here too, so a
+    refused window is never instrumented). Accepted: a window whose top-level window is one of
+    the session's (``windows.find_window``) or an attached tab's top; the attached tab; and,
+    for ``tab:`` only, a tab ``windows.ie_mode_tabs`` lists (which leaves out other live
+    sessions). A stale hwnd that Windows gave to another window fails the same checks.
+    """
+    if kind == "tab" and hwnd == attached_tab():
+        return
+    root = windows.root_window(hwnd) or hwnd
+    if root in windows.ATTACHED_TOPS or windows.find_window(root) is not None:
+        return
+    if kind == "tab":
+        if any(t.hwnd == hwnd for t in windows.ie_mode_tabs(with_url=False)):
+            # The drain instruments this unattached tab of the user's like an attached one, so
+            # the Fidelity row "instrumentation left in an attached tab" must show.
+            from ie_mcp.tools import attach  # lazy: the tools import this module
+            attach.USED = True
+            return
+        raise ValueError(f"tab:{hwnd} is not a window of this session (list the user's tabs "
+                         "with ie_tabs, then ie_attach one)")
+    raise ValueError(f"hwnd:{hwnd} is not a window of this session (see ie_windows)")
+
+
 def resolve_backend(target):
-    """The backend for ``target`` (None: ``DEFAULT_TARGET``, else the driver)."""
+    """The backend for ``target`` (None: ``DEFAULT_TARGET``, else the driver).
+
+    A ``hwnd:``/``tab:`` target must pass ``check_target`` first (ValueError otherwise).
+    """
     kind, hwnd = _parse_target(target)
     if kind == "driver":
         return DriverBackend()
+    check_target(kind, hwnd)
     return ComBackend(hwnd, kind=kind)
 
 

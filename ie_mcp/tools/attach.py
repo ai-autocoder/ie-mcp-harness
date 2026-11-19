@@ -26,8 +26,8 @@ from ie_mcp.win32 import messages, windows
 # (the Fidelity row "Instrumentation left in an attached tab", see ie_status modifications).
 USED = False
 
-LIMITS = ("Limits: no driver-only tools while attached (navigation, history, page screenshot, "
-          "upload: call ie_detach first), no proxy capture of the tab's traffic (only what the "
+LIMITS = ("Limits: no driver-only tools while attached (navigation, history, ie_wait_ready, "
+          "page screenshot, upload: call ie_detach first), no proxy capture of the tab's traffic (only what the "
           "page's own instrumentation records), and a page's prompt cannot be answered (only "
           "alert and confirm windows pass the ie_dialog checks; answer a prompt yourself or "
           "ask the user). Keys, hover, window screenshots and ie_console work through COM and "
@@ -93,7 +93,8 @@ def t_tabs(args):
 @tool(
     "ie_attach",
     "Attach to one of the user's IE-mode tabs (hwnd from ie_tabs) so the read and interact "
-    "tools (ie_text, ie_html, ie_click, ie_fill, ie_js, ie_wait_*, ie_windows, ie_console, "
+    "tools (ie_text, ie_html, ie_click, ie_fill, ie_js, ie_wait_text, ie_wait_element, "
+    "ie_windows, ie_console, "
     "ie_screenshot scope=window ...) act on it without a target, over COM. The user keeps their "
     "login and page state. The tab's script instrumentation (see ie_console) is installed and "
     "stays in the tab until it is reloaded, even after ie_detach. ie_close needs ie_detach "

@@ -2,7 +2,7 @@
 import time
 
 from ie_mcp import config, session
-from ie_mcp.protocol import attach_budget, text_result, tool
+from ie_mcp.protocol import attach_budget, number_arg, text_result, tool
 from ie_mcp.session import SESSION, log
 
 # Post-load pauses; the watchdog budget below is computed from the same defaults.
@@ -50,7 +50,7 @@ def t_open(args):
             d.get(url)
         except Exception as exc:
             log("get() note:", exc)
-    time.sleep(args.get("wait", OPEN_WAIT))
+    time.sleep(number_arg(args, "wait", OPEN_WAIT))
     # A new session's URL is its initial URL, which the proxy never sees (spike D11).
     return with_capture_notices(
         text_result(f"opened {url}\ntitle: {d.title}\nurl: {d.current_url}"), url, fresh=fresh)
@@ -73,7 +73,7 @@ def t_goto(args):
         d.get(url)
     except Exception as exc:
         log("get() note:", exc)
-    time.sleep(args.get("wait", GOTO_WAIT))
+    time.sleep(number_arg(args, "wait", GOTO_WAIT))
     return with_capture_notices(text_result(f"title: {d.title}\nurl: {d.current_url}"), url)
 
 
@@ -85,7 +85,7 @@ def t_goto(args):
 def t_back(args):
     d = SESSION.ensure()
     d.back()
-    time.sleep(args.get("wait", 2))
+    time.sleep(number_arg(args, "wait", 2))
     return text_result(f"back -> {d.current_url}")
 
 
@@ -97,7 +97,7 @@ def t_back(args):
 def t_forward(args):
     d = SESSION.ensure()
     d.forward()
-    time.sleep(args.get("wait", 2))
+    time.sleep(number_arg(args, "wait", 2))
     return text_result(f"forward -> {d.current_url}")
 
 

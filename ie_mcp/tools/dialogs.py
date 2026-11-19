@@ -12,8 +12,9 @@ Two paths (spike D2/D14):
 
 Evidence from the page (``ie_mcp.tools.console``): an answer carries the page's own
 ``dialog-open`` record for the dialog when there is one, and a dialog shown as a TaskDialog is
-accepted only when such a record is pending (its message cannot be read from the window, and
-IE's "leave this page?" prompt has the same shape).
+accepted (through its window or through the driver alert, which IEDriver also gives for the
+"leave this page?" prompt, seen live) only when such a record is pending (its message cannot be
+read from the window, and IE's "leave this page?" prompt has the same shape).
 """
 from ie_mcp import protocol
 from ie_mcp.protocol import tool
@@ -40,7 +41,8 @@ PROMPT_DRIVER_REACH = True
     "button (alert: OK; confirm: accept = OK/true, dismiss = Cancel/false) after checking that "
     "it really is the session's own alert or confirm; a confirm's message is not readable "
     "through its window, so action=text then asks the driver alert when it can. A dialog shown "
-    "as a TaskDialog is accepted only when the page's instrumentation recorded it (a pending "
+    "as a TaskDialog (IE's \"leave this page?\" prompt has that shape) is accepted, with or "
+    "without target, only when the page's instrumentation recorded it (a pending "
     "dialog-open record, see ie_console); otherwise accept is refused: ask the user. Answers "
     "carry that record as evidence. A prompt is "
     "answered only through the driver alert, so a prompt raised inside a showModalDialog window "
@@ -135,11 +137,12 @@ def _taskdialog_text_from_driver():
 
 # --- no target --------------------------------------------------------------------------------
 def _without_target(action, text):
+    probe_failed = False
     try:
         modal = list(protocol.MODAL_PROBE() or [])
     except Exception as exc:
         log(f"modal probe failed: {exc}")
-        modal = []
+        modal, probe_failed = [], True
     html_dialog_open = any(w.get("kind") == "html_dialog" for w in modal)
     scripts = [w for w in modal if w.get("kind") == "script_dialog"]
     prompts = [w for w in scripts if w.get("is_prompt")]
@@ -159,7 +162,10 @@ def _without_target(action, text):
             alert = None
             note = f"no dialog present: {str(exc).splitlines()[0] if str(exc) else exc!r}"
         if alert is not None:
-            return _driver_alert(alert, action, text)
+            evidence = None
+            if action in ("accept", "sendkeys"):  # sendkeys also accepts
+                evidence = _driver_accept_evidence(answerable, probe_failed)
+            return _driver_alert(alert, action, text, evidence)
         if not answerable and not prompts:
             return json_result({"ok": False, "note": note})
     if len(answerable) > 1:
@@ -172,6 +178,31 @@ def _without_target(action, text):
     return json_result({"ok": False, "note": "no dialog present"})
 
 
+def _driver_accept_evidence(answerable, probe_failed):
+    """The window path's TaskDialog gate, applied before the driver alert is accepted.
+
+    IE's "leave this page?" prompt is a helper-owned TaskDialog, and IEDriver may expose it as
+    an alert, so accepting the driver alert while a TaskDialog is open needs the same proof as
+    ``_by_window``. Returns the used-up ``dialog-open`` record (None when every open dialog is
+    a classic alert or confirm); Refused, with nothing sent, otherwise.
+    """
+    if probe_failed:
+        raise Refused("the open windows could not be listed, so the dialog cannot be shown not "
+                      "to be a 'leave this page?' prompt; ask the user")
+    taskdialogs = []
+    for window in answerable:
+        info, shape, _ = scriptdialogs.confirm_script_dialog(window["hwnd"])
+        if shape == "taskdialog":
+            taskdialogs.append(info)
+    if not taskdialogs:
+        return None
+    if len(answerable) > 1:
+        raise Refused(f"several script dialogs are open and hwnd:{taskdialogs[0].hwnd} is a "
+                      "TaskDialog, so the driver alert could be any of them: pick one with "
+                      "target")
+    return consoletools.taskdialog_accept_evidence(taskdialogs[0])
+
+
 def _with_evidence(answer, text):
     evidence = consoletools.dialog_evidence(text)
     if evidence is not None:
@@ -179,7 +210,14 @@ def _with_evidence(answer, text):
     return answer
 
 
-def _driver_alert(al, action, text):
+def _driver_alert(al, action, text, evidence=None):
+    """Answer the driver alert; ``evidence`` is the record the TaskDialog gate used up."""
+    def answered(answer, txt):
+        if evidence is not None:
+            answer["evidence"] = evidence
+            return answer
+        return _with_evidence(answer, txt)
+
     try:
         if action == "text":
             txt = al.text
@@ -187,13 +225,13 @@ def _driver_alert(al, action, text):
         if action == "sendkeys":
             al.send_keys(text)
             al.accept()
-            return json_result({"ok": True, "did": "sent+accepted"})
+            return json_result(answered({"ok": True, "did": "sent+accepted"}, None))
         if action == "dismiss":
             txt = al.text
             al.dismiss()
             return json_result(_with_evidence({"ok": True, "did": "dismissed", "text": txt}, txt))
         txt = al.text
         al.accept()
-        return json_result(_with_evidence({"ok": True, "did": "accepted", "text": txt}, txt))
+        return json_result(answered({"ok": True, "did": "accepted", "text": txt}, txt))
     except Exception as exc:
         return json_result({"ok": False, "note": str(exc).splitlines()[0] if str(exc) else repr(exc)})

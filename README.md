@@ -262,7 +262,7 @@ frame path), `scope` (`ie_screenshot`), `mode` (`ie_click`) and `force` (`ie_clo
 | `ie_attach` | Attach to one of those tabs by `hwnd` (see [Attaching to a tab you opened](#attaching-to-a-tab-you-opened)). |
 | `ie_detach` | Go back to the driver session. The tab keeps the instrumentation until it is reloaded. |
 | `ie_switch_window` | Make a driver window (pop-up, `showModalDialog` window) the one the other tools act on: `handle`, `title_contains` or `main=true`. Returns the new title and URL. |
-| `ie_close_window` | Close a pop-up or modal dialog by `hwnd:<n>` (`window.close()` over COM, else `WM_CLOSE`) or by driver handle. Refuses the main window (`ie_close`), an attached tab (`ie_detach`) and system dialogs. |
+| `ie_close_window` | Close a pop-up or modal dialog by `hwnd:<n>` (`window.close()` over COM, else `WM_CLOSE`) or by driver handle. Refuses the main window (`ie_close`), an attached tab (`ie_detach`) and system dialogs; while the main window is not known (its adoption failed) it closes no page window, only modal dialogs. |
 | `ie_console` | Records the page instrumentation made, as JSON `{records, next_since_id}`: `error` (script errors), `dialog-open` / `dialog` (an `alert`/`confirm`/`prompt` when it opens and when it closed, with the result), `modal` (`showModalDialog` URL, features, `dialogArguments` and return value), `open` (`window.open`), `console` and `xhr` (native XHR on https pages). Each has `id`, `kind`, `level`, `time`, `text` and `where` (the window target and frame path). Arguments `since_id`, `kinds`, `limit`. Text is redacted. |
 | `ie_console_clear` | Forget every record `ie_console` holds. |
 | `ie_network` | List the HTTP requests the browser made (captured by the local proxy; plus native XHR the page instrumentation saw, `source: page`): one line per request, `id source method status duration_ms size url`, oldest first. Filters `url_contains`, `method`, `status`; page with `since_id` and `limit` (default 50). Needs no browser call, so it works while the page is busy. |
@@ -291,7 +291,12 @@ frame path), `scope` (`ie_screenshot`), `mode` (`ie_click`) and `force` (`ie_clo
 optional `target`. Omitted, the tool uses the session's IE driver. `hwnd:<n>` acts on window
 `<n>` (for example a `showModalDialog` window named in a `NOTICE:`) directly over COM, and
 `tab:<n>` on an attached tab; these calls do not need the driver, so they work while a modal
-dialog blocks it. Over COM:
+dialog blocks it. A target must be a window of this session: `hwnd:<n>` a window `ie_windows`
+lists (or one inside it, or the attached tab's window), `tab:<n>` the attached tab, a page
+window of the session, or a tab `ie_tabs` lists. Anything else, including a window of another
+ie-mcp session or a stale hwnd, is refused (`not a window of this session`) before any COM
+call. Using an unattached tab of yours this way leaves the instrumentation in it, like
+`ie_attach` (the Fidelity row below then shows). Over COM:
 
 - every DOM access runs as script in the page; the window keeps two expandos,
   `__iemcp_r` and `__iemcp_e`, whose values are cleared after each call;
@@ -338,6 +343,15 @@ them. A **script dialog** (`alert`, `confirm`, `prompt`) is answered with `ie_di
 
 - `ie_dialog` without `target` asks the driver's alert first. While a modal HTML dialog is
   open it skips the driver (that call can block) and answers a script dialog window instead.
+  Before it accepts the driver alert (`accept`, or `sendkeys`, which also accepts), the open
+  script dialogs pass the same checks as the window path: if one is a TaskDialog, the accept
+  needs the page's own record (see "Console, errors and dialog records" below), because IE's
+  "leave this page?" prompt has that shape; with several dialogs open and one a TaskDialog,
+  pick one with `target`. `dismiss` and `text` are not restricted. Seen live: IEDriver exposes
+  IE's "leave this page?" prompt (a page's `onbeforeunload`) as an alert, so a plain
+  `ie_dialog` would have left the page; it is refused, `action=text` reads the page's message
+  and `action=dismiss` stays on the page. That prompt ignores the Cancel message, so
+  `ie_close_window` reports `closed: false` for it.
 - `ie_dialog target="hwnd:<n>"` sends `WM_COMMAND` to the dialog's own button, but only after
   checking that the window belongs to the session, that its immediate owner is the browser's
   dialog helper or a `showModalDialog` window (a system dialog is owned by the browser window),
@@ -345,8 +359,9 @@ them. A **script dialog** (`alert`, `confirm`, `prompt`) is answered with `ie_di
   form (icon, message, one OK button for an alert, OK and Cancel for a confirm) or the
   TaskDialog form IE uses for a later dialog of the same page. Anything else is refused and
   nothing is sent.
-- A **system dialog** (file open/save, print, a security or credential prompt, "leave this
-  page?") is never answered or closed: the tools report `system dialog: ask the user`.
+- A **system dialog** (file open/save, print, a security or credential prompt) is never
+  answered or closed: the tools report `system dialog: ask the user`. IE's "leave this page?"
+  prompt is never accepted (see above).
 - The message of a dialog shown as a TaskDialog is not readable through its window (an alert
   and a confirm look the same there); `ie_dialog action=text` asks the driver alert when exactly
   one script dialog is open, otherwise it says the text is not readable.
@@ -488,7 +503,7 @@ design spike, recorded in `docs/spikes/2026-11-17-ie-mode-spike.md`.)
 | Async (script) clicks: `e.click()` queued with `setTimeout`; not user-initiated, no mousedown/mouseup/focus, may be blocked by the pop-up blocker | `ie_click mode="async"` or `IE_CLICK_MODE=async` (default is `driver`, spike D1) | `mode="driver"` / `IE_CLICK_MODE=driver` (the default) |
 | COM input on dialogs and attached tabs: synthetic script events (`ie_fill`: focus, value, keydown/keypress/keyup/change/blur; `ie_hover`: mouseover/mouseenter), a timer click (`setTimeout`, no mousedown/mouseup/focus, also for `double`/`right`, which fire `ondblclick`/`oncontextmenu`), and posted `WM_KEYDOWN`/`WM_KEYUP` messages (documentMode 7+; `fireEvent` below 7) | `target="hwnd:…"`/`"tab:…"` | omit `target` (the driver path) when it works |
 | COM request wrapper: every COM read or action runs as script and leaves the window expandos `__iemcp_r` (`null`) and `__iemcp_e` (`''`) on the target window (top window for frame requests); their values are cleared after each read-back | `target="hwnd:…"`/`"tab:…"` | omit `target` |
-| Instrumentation left in an attached tab after `ie_detach` | `ie_attach` used | reload the tab |
+| Instrumentation left in an attached tab after `ie_detach` | `ie_attach` used, or a `tab:<n>` target named an unattached tab of the user's | reload the tab |
 
 ## Limits
 
@@ -529,8 +544,9 @@ design spike, recorded in `docs/spikes/2026-11-17-ie-mode-spike.md`.)
   and creation time still match, because Windows reuses PIDs. `taskkill` never runs with `/T`;
   a process with no recorded identity is never killed.
 - **System dialogs are never clicked.** File open/save, print, security and credential prompts
-  and "leave this page?" are reported (`system dialog: ask the user`) for you to act on. Only a
-  script `alert`/`confirm` the session can prove is its own is answered.
+  are reported (`system dialog: ask the user`) for you to act on. IE's "leave this page?"
+  prompt is never accepted (`ask the user`); only "stay" (`ie_dialog action=dismiss`) is sent.
+  Only a script `alert`/`confirm` the session can prove is its own is accepted.
 - **What is never changed:** the registry (the one exception is the opt-in `IE_SITE_LIST` policy
   writer, under HKCU), Windows, Internet Options, Protected Mode, zones, the system or WinINet
   proxy, the firewall, Edge settings and certificates. The `ProxyOverride` list is only read.

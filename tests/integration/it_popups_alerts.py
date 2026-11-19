@@ -6,6 +6,7 @@ works; D14 = the driver alert reaches a prompt. Dialogs are opened with an async
 queues the click on the page's timer, so the call cannot block on the dialog it opens.
 """
 import json
+import time
 import unittest
 
 from tests.integration.base import IntegrationTestCase
@@ -106,6 +107,45 @@ class PopupsAlertsTests(IntegrationTestCase):
         self.wait_no_window("script_dialog")
         self.assertEqual(self.eventually(lambda: self.shown("prompt_result") or None,
                                          message="prompt_result to be filled"), "null")
+
+    # -- "leave this page?" ----------------------------------------------------
+    def test_leave_page_prompt_is_not_accepted_by_a_plain_ie_dialog(self):
+        # IE's onbeforeunload prompt is a helper-owned TaskDialog, like a later alert or
+        # confirm, and IEDriver exposes it as an alert (seen live: the driver reads the page's
+        # message). It has no dialog-open record behind it, so ie_dialog's default accept is
+        # refused and the page is not left; dismiss ("stay on this page") still works.
+        self.fresh()
+        self.open_page("leave.htm")
+        self.addCleanup(self.drop_leave_handler)
+        self.text("ie_fill", by="id", value="draft", text="unsaved")
+        self.text("ie_click", by="id", value="do_leave", mode="async", wait=0)
+        try:
+            prompt = self.wait_window("script_dialog", timeout=15)
+        except AssertionError:
+            self.fail("no leave-this-page prompt; the page is now "
+                      + self.text("ie_js", script="return document.URL"))
+        refused = self.call("ie_dialog")  # action accept
+        self.assertTrue(refused.get("isError"), refused)
+        self.assertIn("leave this page", self.texts(refused)[0])
+        self.assertIn("ask the user", self.texts(refused)[0])
+        self.assertIn(prompt["hwnd"], [w["hwnd"] for w in self.window_list()])
+        self.assertEqual(self.dialog(action="text")["text"], "The draft is not saved.")
+        self.assertEqual(self.dialog(action="dismiss")["did"], "dismissed")
+        self.wait_no_window("script_dialog")
+        self.assertIn("leave.htm", self.text("ie_js", script="return document.URL"))
+        self.assertEqual(self.text("ie_get", by="id", value="draft", attr="value"), "unsaved")
+
+    def drop_leave_handler(self):
+        """Stay on the page if the prompt is still up (its window ignores Cancel, so
+        close_open_windows cannot close it), then remove the page's onbeforeunload so the
+        next navigation of the session raises no prompt."""
+        for _ in range(3):
+            if not [w for w in self.window_list() if w["kind"] == "script_dialog"]:
+                break
+            self.call("ie_dialog", action="dismiss")
+            time.sleep(0.5)
+        self.close_open_windows()
+        self.call("ie_js", script="window.onbeforeunload = null; return 1")
 
     # -- pop-up window -------------------------------------------------------
     def test_popup_window(self):

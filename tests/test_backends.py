@@ -160,6 +160,9 @@ class BackendTestCase(unittest.TestCase):
             mock.patch.object(htmldoc, "document_from_hwnd", self.docs),
             mock.patch.object(htmldoc, "ie_server_child", return_value=11),
             mock.patch.object(backends, "_pythoncom", return_value=FAKE_PYTHONCOM),
+            # The fake hwnds are no real windows; session membership is tested in
+            # tests/test_attach.py (SessionTargetTests).
+            mock.patch.object(backends, "check_target", lambda kind, hwnd: None),
             # A COM test that reaches the driver would start a real browser: fail instead.
             mock.patch.object(SESSION, "ensure",
                               side_effect=AssertionError("the test started a browser")),

@@ -305,14 +305,15 @@ def other_sessions_starting():
     return session.starting_sessions(paths.root, paths.session_id)
 
 
-def ie_mode_tabs(enum_fn=None):
+def ie_mode_tabs(enum_fn=None, with_url=True):
     """The IE-mode tabs of user-visible Edge windows, as ``TabInfo`` (one per visible IE server).
 
     A top window counts when it is visible, belongs to an ``msedge.exe`` process and has a
     visible ``Internet Explorer_Server`` descendant. Windows in the process trees of other live
     ie-mcp sessions are left out. The URL is read through COM (the caller must be in a COM
-    apartment; ``""`` when pywin32 or the read is missing). Inactive tabs have a hidden server
-    window and are not listed: activate the tab in the browser first.
+    apartment; ``""`` when pywin32 or the read is missing; not read at all with
+    ``with_url=False``, which makes no COM call). Inactive tabs have a hidden server window and
+    are not listed: activate the tab in the browser first.
     """
     rows = processes.snapshot()
     edge = {r.pid for r in rows if r.exe.lower() == EDGE_IMAGE}
@@ -329,7 +330,7 @@ def ie_mode_tabs(enum_fn=None):
                 continue
             tabs.append(TabInfo(hwnd=server.hwnd, top_hwnd=w.hwnd,
                                 ancestors=ancestor_chain(server.hwnd), pid=pid, title=w.title,
-                                url=_server_url(server.hwnd)))
+                                url=_server_url(server.hwnd) if with_url else ""))
     return tabs
 
 

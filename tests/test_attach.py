@@ -445,11 +445,98 @@ class AttachToolTests(AttachTestCase):
         self.assertNotIn("ie_detach", text_of(result))
         self.ensure.assert_called()
 
+    def test_the_attached_refusal_carries_the_modal_notice(self):
+        backends.DEFAULT_TARGET = "tab:5"
+        protocol.MODAL_PROBE = lambda: [{"hwnd": 30, "kind": "script_dialog",
+                                         "title": "Message from webpage"}]
+        texts = [item["text"] for item in call("ie_wait_ready", {})["content"]]
+        self.assertIn("ie_detach", texts[0])
+        self.assertTrue(any(t.startswith("NOTICE: script_dialog open") for t in texts[1:]), texts)
+
+    def test_attach_description_promises_only_tools_that_work_while_attached(self):
+        description = protocol.REGISTRY["ie_attach"].description
+        self.assertNotIn("ie_wait_*", description)
+        self.assertIn("ie_wait_text", description)
+        self.assertIn("ie_wait_ready", description)  # named among the refused driver tools
+
     def test_resolve_tab_target_uses_com_backend(self):
         backends.DEFAULT_TARGET = "tab:5"
         backend = backends.resolve_backend(None)
         self.assertIsInstance(backend, backends.ComBackend)
         self.assertEqual((backend.kind, backend.hwnd), ("tab", 5))
+
+
+REAL_DRAIN = consoletools.drain_target
+
+
+class SessionTargetTests(AttachTestCase):
+    """A hwnd:/tab: target must be a window of this session (or the user's listed tab) before
+    any COM call and before the AFTER_CALL drain instruments it."""
+
+    def setUp(self):
+        super().setUp()
+        self.com = mock.Mock(side_effect=AssertionError("a COM backend was built"))
+        self.patch(backends, "ComBackend", self.com)
+        self.patch(consoletools, "drain_target", REAL_DRAIN)
+        protocol.AFTER_CALL = [consoletools.dialog_drain]
+        self.patch(config, "SETTINGS", dataclasses.replace(config.SETTINGS, instrument=True))
+        roots = {11: 10, 61: 60, 71: 70}  # an IE server's top-level window
+        self.patch(windows, "root_window", lambda hwnd: roots.get(hwnd, hwnd))
+        self.patch(windows, "session_window_pids", lambda: {EDGE})
+        # Session window 10 (with its IE server 11) and a foreign Edge window 60 (server 61).
+        fake = [raw(10, children=[RawChild(11, IE_SERVER, 0, True)]),
+                raw(60, pid=OTHER_SESSION, children=[RawChild(61, IE_SERVER, 0, True)])]
+        self.patch(windows, "_enum_top_level", lambda: list(fake))
+        self.patch(windows, "ie_mode_tabs", lambda enum_fn=None, with_url=True: [])
+
+    def test_a_foreign_hwnd_or_tab_is_refused_before_com_and_drain(self):
+        for target in ("hwnd:60", "hwnd:61", "hwnd:999", "tab:61", "tab:999"):
+            for name, args in (("ie_js", {"script": "return 1"}), ("ie_text", {}),
+                               ("ie_press_key", {"key": "Enter"})):
+                with self.subTest(target=target, tool=name):
+                    result = call(name, {**args, "target": target})
+                    self.assertTrue(result.get("isError"), result)
+                    self.assertIn("not a window of this session", text_of(result))
+        self.com.assert_not_called()
+        self.assertFalse(attach.USED)
+
+    def test_a_tab_of_another_live_session_is_refused(self):
+        # ie_mode_tabs leaves other sessions out; tab:61 is not listed, so it is refused.
+        self.patch(windows, "ie_mode_tabs",
+                   lambda enum_fn=None, with_url=True: [self.tab(hwnd=71, top=70)])
+        with self.assertRaisesRegex(ValueError, "not a window of this session"):
+            backends.resolve_backend("tab:61")
+        self.com.assert_not_called()
+
+    def test_session_windows_and_the_attached_tab_are_accepted(self):
+        self.com.side_effect = None
+        backends.resolve_backend("hwnd:10")
+        backends.resolve_backend("tab:11")  # the IE server of a session window
+        windows.ATTACHED_TOPS = {80}
+        backends.DEFAULT_TARGET = "tab:81"
+        backends.resolve_backend(None)
+        backends.resolve_backend("tab:81")
+        backends.resolve_backend("hwnd:80")
+        self.assertEqual(self.com.call_count, 5)
+        self.assertFalse(attach.USED)
+
+    def test_an_unattached_tab_of_the_user_is_accepted_and_shows_the_fidelity_row(self):
+        from ie_mcp.tools import diagnostics
+        self.com.side_effect = None
+        listed = []
+
+        def tabs(enum_fn=None, with_url=True):
+            listed.append(with_url)
+            return [self.tab(hwnd=71, top=70)]
+
+        self.patch(windows, "ie_mode_tabs", tabs)
+        backends.resolve_backend("tab:71")
+        self.assertEqual(listed, [False])  # no COM read of the user's other tabs
+        self.assertTrue(attach.USED)
+        self.assertTrue(any("Instrumentation left in an attached tab" in r
+                            for r in diagnostics.modifications()))
+        with self.assertRaisesRegex(ValueError, "not a window of this session"):
+            backends.resolve_backend("hwnd:71")  # hwnd: never reaches the user's tabs
 
 
 class AttachedHelperTests(AttachTestCase):

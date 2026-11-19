@@ -85,6 +85,8 @@ class ConsoleTestCase(WindowToolsTestCase):
         FakeCom.instances, FakeCom.raw, FakeCom.fail = [], "", False
         self.patch(backends, "ComBackend", FakeCom)
         self.patch(backends, "DEFAULT_TARGET", None)
+        # Fake hwnds: session membership is tested in tests/test_attach.py (SessionTargetTests).
+        self.patch(backends, "check_target", lambda kind, hwnd: None)
 
     def patch(self, target, name, value):
         # create=True: SESSION.capture_active only exists once Task 13 wires the proxy.

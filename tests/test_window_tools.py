@@ -317,6 +317,10 @@ class SwitchWindowTests(WindowToolsTestCase):
 
 
 class CloseWindowTests(WindowToolsTestCase):
+    def setUp(self):
+        super().setUp()
+        self.patch(SESSION, "main_hwnd", 10)
+
     def test_close_window_hwnd_prefers_com_then_wm_close(self):
         self.infos = [info(10, "main"), info(20, "popup", title="Popup")]
         closes = []
@@ -343,6 +347,20 @@ class CloseWindowTests(WindowToolsTestCase):
             result = call("ie_close_window", {"target": "hwnd:20"})
         self.assertFalse(result.get("isError"), result)
         self.assertTrue(json.loads(first_text(result))["closed"])
+        self.assertEqual(self.posted, [])
+
+    def test_close_window_refuses_a_page_window_while_the_main_window_is_unknown(self):
+        # main_hwnd None (adoption failed): the main window classifies as a pop-up, so no page
+        # window is closed; a modal HTML dialog still is.
+        self.patch(SESSION, "main_hwnd", None)
+        self.infos = [info(10, "popup", title="Page"),
+                      info(42, "html_dialog", "Internet Explorer_TridentDlgFrame", "Lookup")]
+        with mock.patch.object(ComBackend, "close_window") as com:
+            result = call("ie_close_window", {"target": "hwnd:10"})
+            self.assertTrue(is_error(result, "cannot tell which is the main window"), result)
+            com.assert_not_called()
+            self.assertFalse(call("ie_close_window", {"target": "hwnd:42"}).get("isError"))
+            com.assert_called_once()
         self.assertEqual(self.posted, [])
 
     def test_close_window_refuses_main(self):
@@ -556,6 +574,72 @@ class DialogToolTests(WindowToolsTestCase):
         self.assertEqual((answer["ok"], answer["did"], answer["text"]),
                          (True, "accepted", "Hello alert"))
         self.assertEqual(Alert.accepted, 1)
+        self.assertEqual(self.posted, [])
+
+    def driver_alert(self):
+        class Alert:
+            text = "Are you sure?"
+            calls = []
+
+            def accept(self):
+                Alert.calls.append("accept")
+
+            def dismiss(self):
+                Alert.calls.append("dismiss")
+
+            def send_keys(self, keys):
+                Alert.calls.append("send_keys")
+
+        driver = self.use_driver(FakeDriver({"H1": ("Page", "http://x/")}))
+        driver.alert_obj = Alert()
+        return Alert
+
+    def test_dialog_without_target_never_accepts_an_unproven_taskdialog_through_the_driver(self):
+        # IE's "leave this page?" prompt is a helper-owned TaskDialog, and IEDriver may expose
+        # it as an alert: without the page's own record the driver alert is not accepted.
+        self.set_modal(self.dialog(info(130, "script_dialog", "#32770", "Windows Internet "
+                                        "Explorer"), TASKDIALOG_CHILDREN))
+        self.patch(consoletools, "drain_dialog_owner", lambda owner_hwnd: 0)
+        alert = self.driver_alert()
+        for action in ("accept", "sendkeys"):
+            with self.subTest(action=action):
+                result = call("ie_dialog", {"action": action, "text": "x"})
+                self.assertTrue(is_error(result, "leave this page", "ask the user"), result)
+        self.assertEqual(alert.calls, [])
+        self.assertEqual(self.posted, [])
+        # dismiss and text stay on the driver: they never leave the page.
+        self.assertEqual(json.loads(first_text(call("ie_dialog", {"action": "text"})))["text"],
+                         "Are you sure?")
+        self.assertEqual(json.loads(first_text(call("ie_dialog", {"action": "dismiss"})))["did"],
+                         "dismissed")
+        self.assertEqual(alert.calls, ["dismiss"])
+
+    def test_dialog_without_target_accepts_a_recorded_taskdialog_through_the_driver(self):
+        self.set_modal(self.dialog(info(131, "script_dialog", "#32770", "Message from webpage"),
+                                   TASKDIALOG_CHILDREN))
+        consoletools.STORE.add_many([ConsoleRecord(0, "dialog-open", "confirm", time.time(),
+                                                   "Are you sure?", "hwnd:1", "t.9")])
+        self.addCleanup(consoletools.STORE.clear)
+        self.patch(consoletools, "drain_dialog_owner", lambda owner_hwnd: 1)
+        alert = self.driver_alert()
+        answer = json.loads(first_text(call("ie_dialog", {"action": "accept"})))
+        self.assertEqual((answer["ok"], answer["did"]), (True, "accepted"), answer)
+        self.assertEqual(answer["evidence"]["dialog_id"], "t.9")
+        self.assertEqual(alert.calls, ["accept"])
+        self.assertEqual(self.posted, [])
+
+    def test_dialog_without_target_refuses_a_driver_accept_it_cannot_attribute(self):
+        # Two dialogs, one a TaskDialog: the driver alert could be either one.
+        self.set_modal(self.dialog(alert_info(132), alert_children(132)),
+                       self.dialog(info(133, "script_dialog", "#32770", ""), TASKDIALOG_CHILDREN))
+        alert = self.driver_alert()
+        self.assertTrue(is_error(call("ie_dialog", {}), "hwnd:133", "target"))
+        # A dialog-shaped window that fails the session checks: nothing is accepted either.
+        self.infos, self.children = [], {}
+        self.set_modal(self.dialog(alert_info(134, owner_cls="Chrome_WidgetWin_1"),
+                                   alert_children(134)))
+        self.assertTrue(is_error(call("ie_dialog", {}), "ask the user"))
+        self.assertEqual(alert.calls, [])
         self.assertEqual(self.posted, [])
 
     def test_dialog_without_target_and_nothing_open(self):
