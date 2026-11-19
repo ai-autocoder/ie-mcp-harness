@@ -1,13 +1,21 @@
 # ie-mcp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
 [![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
-[![Version: 0.1.0](https://img.shields.io/badge/version-0.1.0-blue.svg)](#status)
+[![Version: 0.2.0](https://img.shields.io/badge/version-0.2.0-blue.svg)](CHANGELOG.md)
 
 **Give an LLM the ability to drive a legacy IE-only web application.**
+
+> **This is a fork.** `ie-mcp-harness` is a fork of
+> [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT), the project that created the Edge
+> IE-mode / IEDriver MCP server this one grew from; upstream's copyright stays in
+> [LICENSE](LICENSE). The fork adds the *harness*: full access to an IE-mode page without
+> changing how it behaves (modal dialogs, pop-ups and attached tabs over COM, network capture,
+> console and dialog records, window screenshots). The package and the command are still called
+> `ie-mcp`. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 > ⚠️ **Status: alpha / work in progress.** This project is under active development.
 > The tool surface and configuration may change between versions, and breaking changes
@@ -33,12 +41,13 @@ extraction, readiness probing) tuned for the quirks of the Trident engine.
 
 No clone, no separate install. Requires [`uv`](https://docs.astral.sh/uv/) on PATH
 (`pip install uv`, or `winget install astral-sh.uv`). `uvx` fetches the repo, installs
-selenium into an isolated env, and runs the server on each launch:
+selenium and `pywin32` (the `win32` extra: modal dialogs and attached tabs need it) into an
+isolated env, and runs the server on each launch:
 
 ```bash
-claude mcp add ie-mcp -- uvx --from git+https://github.com/thomfilg/ie-mcp.git ie-mcp
-codex  mcp add ie-mcp -- uvx --from git+https://github.com/thomfilg/ie-mcp.git ie-mcp
-gemini mcp add ie-mcp    uvx --from git+https://github.com/thomfilg/ie-mcp.git ie-mcp
+claude mcp add ie-mcp -- uvx --from "ie-mcp[win32] @ git+https://github.com/ai-autocoder/ie-mcp-harness.git" ie-mcp
+codex  mcp add ie-mcp -- uvx --from "ie-mcp[win32] @ git+https://github.com/ai-autocoder/ie-mcp-harness.git" ie-mcp
+gemini mcp add ie-mcp    uvx --from "ie-mcp[win32] @ git+https://github.com/ai-autocoder/ie-mcp-harness.git" ie-mcp
 ```
 
 > `claude mcp add` takes `<name> <command…>` — here the name is `ie-mcp` and the command
@@ -50,9 +59,9 @@ Install the `ie-mcp` command on PATH, then let it register itself with every MCP
 
 ```bash
 # 1. install (pipx/uv keep it isolated)
-pipx install git+https://github.com/thomfilg/ie-mcp.git
-#   or:  uv tool install git+https://github.com/thomfilg/ie-mcp.git
-#   or from a clone:  pipx install .
+pipx install "ie-mcp[win32] @ git+https://github.com/ai-autocoder/ie-mcp-harness.git"
+#   or:  uv tool install "ie-mcp[win32] @ git+https://github.com/ai-autocoder/ie-mcp-harness.git"
+#   or from a clone:  pipx install ".[win32]"
 
 # 2. register with every MCP client found on PATH (Claude Code, Codex, Gemini CLI)
 ie-mcp --install
@@ -65,7 +74,7 @@ the launch path already solved. Remove it again with `ie-mcp --uninstall`.
 
 `ie-mcp --install` (Option B) does this for you. To wire one up manually, use the `ie-mcp`
 command (after `pipx install`). If you skipped the install (Option A), replace `ie-mcp`
-in the command column with `uvx --from git+https://github.com/thomfilg/ie-mcp.git ie-mcp`.
+in the command column with `uvx --from "ie-mcp[win32] @ git+https://github.com/ai-autocoder/ie-mcp-harness.git" ie-mcp`.
 
 | Client | Command |
 |--------|---------|
@@ -100,21 +109,38 @@ default, add the env var to that client's `env` block — see [Configuration](#c
 > unresponsive on startup, give it a longer init timeout and confirm `ie-mcp --selftest`
 > passes standalone first.
 
-Download **IEDriverServer.exe** (matching your Edge / selenium version) from the
+Download **IEDriverServer.exe** (the 32-bit `4.14.0` build is the reference) from the
 [Selenium downloads](https://www.selenium.dev/downloads/) page if it isn't already in the
-default per-user selenium cache.
+per-user selenium cache (`%USERPROFILE%\.cache\selenium\IEDriverServer\`), or set
+`IE_DRIVER_PATH`.
 
 ### Verify the setup
 
-Before (or after) wiring up a client, run the built-in self-test. It checks dependencies
-and paths, then opens and closes a real IE-mode session and confirms the Trident engine is
-actually in use:
+Before (or after) wiring up a client, run the built-in self-test. It needs an unlocked
+desktop: it opens a real, visible IE-mode window on the fixture site that ships with the
+package (`ie_mcp_fixtures`, served from `127.0.0.1`), so it works from a plain `pip install`
+and touches no site of yours.
 
 ```bash
 ie-mcp --selftest
 ```
 
-A passing run prints `RESULT: PASS` and an IE/Trident `userAgent`.
+It prints one `PASS`, `FAIL` or `SKIP` line per check, then `RESULT: PASS` or `RESULT: FAIL`
+(exit code 0 or 1):
+
+| Check | What it proves |
+|---|---|
+| selenium import, IEDriverServer, Edge, pywin32 | The dependencies and paths exist (the driver path is the one `IE_DRIVER_PATH` or discovery gives). |
+| fixture server | The bundled fixture site starts. |
+| IE-mode session | The session renders in the Trident engine: a Trident `userAgent` and `documentMode` 7 on `form.htm`. |
+| proxy verified | The browser's traffic goes through the recording proxy (`SKIP` with `IE_CAPTURE=0`). |
+| loader kept documentMode | The loader the proxy inserts runs before the page's own scripts (the load-time error of the `errors.htm` fixture reaches `ie_console`) and leaves `documentMode` 7 on `form.htm` (`SKIP` unless capture is `proxy` and `IE_INSTRUMENT=1`). |
+| instrumentation present | The page instrumentation is installed (`SKIP` with `IE_INSTRUMENT=0`). |
+| modal dialog | A `showModalDialog` window is detected and closed (`SKIP` without pywin32). |
+| no leftover processes | Every Edge and IEDriver process the run started is gone. |
+
+If selenium, the driver or Edge is missing, the browser checks are skipped. A missing pywin32 fails
+its own line and skips only the modal check. See [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -153,7 +179,9 @@ to run them, but it is notoriously awkward to automate:
   the log is redacted (passwords, tokens, cookies; see `IE_CAPTURE_REDACT`).
 - **Safe orphan cleanup** kills only browsers proven to belong to a crashed session; live agents
   and untracked Edge processes are preserved.
-- **No required pip install** — selenium can be loaded from a vendored deps folder.
+- **Vendored selenium** — selenium can be loaded from a deps folder (`IE_PYDEPS`) instead of a pip install.
+- **Modal dialogs, pop-ups and attached tabs**, read and driven over COM (works while the driver is blocked).
+- **Console, script-error and dialog records** (`ie_console`) and **window screenshots** that include open dialogs.
 - **Built-in `--selftest`** to diagnose your setup before wiring up a client.
 
 ---
@@ -165,8 +193,9 @@ to run them, but it is notoriously awkward to automate:
 | **Windows** | IE mode only exists on Windows; the process-tracking and policy code use `tasklist`, `taskkill` (never `/T`), PowerShell/CIM, `winreg` and Win32 process APIs (ctypes). |
 | **Microsoft Edge** | With IE mode available (Edge ships it on Windows 10/11). |
 | **IEDriverServer.exe** | The Selenium IE driver (e.g. `4.14.0`). |
-| **Python 3.8+** | Standard library only, plus selenium. |
-| **selenium** | `>=4.14.0` — installed via `requirements.txt` or vendored (see below). |
+| **Python 3.10+** | Current selenium requires it. |
+| **selenium** | `>=4.14.0,<5` — installed with the package, via `requirements.txt`, or vendored (see below). |
+| **pywin32** | Optional extra `.[win32]` (`pywin32>=306`): COM access to modal dialogs, pop-ups and attached tabs. The server starts and lists its tools without it; the tools that need it say so. |
 
 ---
 
@@ -210,6 +239,9 @@ All configuration is via environment variables — **all optional**:
 ---
 
 ## Tools
+
+Arguments that recur: `target` (act on a dialog or tab over COM, see below), `frame` (a
+frame path), `scope` (`ie_screenshot`), `mode` (`ie_click`) and `force` (`ie_close`).
 
 | Tool | Description |
 |------|-------------|
@@ -428,11 +460,95 @@ only with `IE_INSTRUMENT=1`, only into HTML documents requested as pages, never 
 XHR answers. Modified responses are marked `Cache-Control: no-store`, and requests that accept
 HTML are sent with `Accept-Encoding: identity`. `IE_INSTRUMENT=0` turns all of that off.
 
+## Fidelity: what the harness changes
+
+The harness exists to show how a legacy page really behaves, so everything it changes is
+listed here, in `ie_status` (`modifications` names the ones active right now) and has an env
+var that turns it off. It never changes the document mode, the charset detection or the
+content of a response that is not an HTML document. (`D<n>` in the table is a decision of the
+design spike, recorded in `docs/spikes/2026-11-17-ie-mode-spike.md`.)
+
+| Change | When | Switch |
+|---|---|---|
+| Loader `<script>` (absolute `…/__iemcp__/i.js` on the document's host; it removes itself when it runs) in HTML documents, including XHR responses that are full documents fetched with `Accept: text/html`. Only `text/html` 200 responses, not encoded, not attachments, whose first tag is a doctype, `<html`, `<head` or `<body`; never fragments, plain text, UTF-16 bodies, HEAD/204/304, head-less framesets or `<?xml` documents. `Content-Length` is fixed or the body re-chunked | Proxy on, `IE_INSTRUMENT=1` and spike D10 = yes | `IE_INSTRUMENT=0` |
+| `Accept-Encoding: identity` on every request whose `Accept` contains `text/html` (documents, and XHRs that ask for HTML), whether or not the response is then modified | Proxy on, `IE_INSTRUMENT=1` and spike D10 = yes | `IE_INSTRUMENT=0` |
+| `Cache-Control: no-store`, validators dropped (Back re-fetches the page; Back to a POST result shows "Webpage has expired") | Only on responses the proxy modified | `IE_INSTRUMENT=0` |
+| Conditional request headers stripped (pages re-fetched instead of served from cache) | `IE_CAPTURE_NO_CACHE=1` (off by default) | `IE_CAPTURE_NO_CACHE=0` |
+| `window.onerror` replaced by a wrapper (marker `__iemcp = 1`) that records the error, then calls the page's own handler with the same arguments and returns its value; put back in front when the page replaces it. Same-error duplicates within 100 ms are recorded once | Every instrumented document (after each driver tool call; COM documents via the dialog drain) | `IE_INSTRUMENT=0` |
+| `alert`, `confirm`, `prompt` replaced by wrappers that record (`dialog-open` before, `dialog` after) and call the original with the caller's exact arguments, returning its result. `typeof alert` becomes `function` where it was `object`. The message and result are converted with `String()` (a page object's `toString` may run; guarded). An in-flight counter (`__iemcp.open`, also in a same-origin top window) is kept | Instrumentation active | `IE_INSTRUMENT=0` |
+| `showModalDialog` replaced by a wrapper that records URL, features, a one-level summary of `dialogArguments` and the return value; the arguments and `dialogArguments` object are passed through unchanged | Instrumentation active | `IE_INSTRUMENT=0` |
+| `window.open` replaced by a wrapper that records URL, name and features and returns the original's window object | Instrumentation active | `IE_INSTRUMENT=0` |
+| The page's own `console` methods replaced by recording wrappers that call the original (kept as an extra property `__iemcp_<method>` of the console object, because a detached call can fail in old IE). Arguments are converted with `String()` (a page object's `toString` may run; guarded) and at most 6 are forwarded. Nothing is created or added | Only where `window.console` exists (documentMode 11 yes, 7 no, spike D5) | `IE_INSTRUMENT=0` |
+| `XMLHttpRequest.prototype.open`/`send` replaced by recording wrappers (originals kept as `__iemcp_open`/`__iemcp_send` of the prototype; an expando `__iemcp_x` on each request object; a `readystatechange` listener per async request; the page's own handler is untouched). Method, URL and a string body are converted with `String()` (guarded). ActiveX `XMLHTTP` is never touched; not done where the document has no `XMLHttpRequest.prototype` (documentMode 7) | `https:` pages, or the proxy is off (`IE_CAPTURE=0`) or saw no traffic (`capture_active` false) | `IE_INSTRUMENT=0` |
+| Window expandos `__iemcp` (record queue and helpers), `__iemcp_stub`, `__iemcp_wrap_xhr` | Instrumentation active | `IE_INSTRUMENT=0` |
+| Hook script element: where `window.execScript` is absent (documentMode 11) a `<script>` element with the instrumentation as its `text` is appended to `<head>` (else the root element) and removed again right after it ran, so `ie_html` shows the original DOM; where `execScript` exists it is used instead and no element is created | After each successful driver tool call, and in dialogs and attached tabs over COM | `IE_INSTRUMENT=0` |
+| Proxy in the request path. It may move intranet hosts that normally bypass a proxy into another IE security zone, which can change Protected Mode, automatic logon and Compatibility View (and with it the document mode). A host listed in `IE_CAPTURE_BYPASS` never reaches the proxy (no capture, no loader, no native-XHR wrapper) | `IE_CAPTURE=1` and the proxy started. `ie_status` `modifications` leaves this row, the loader, `Accept-Encoding` and `no-store` rows out once verification found the browser blind (`capture_active` false: nothing is modified then) | `IE_CAPTURE=0` for every host, or `IE_CAPTURE_BYPASS` for the hosts that must keep their normal proxy bypass (and their zone) |
+| IEDriver native input without window focus (`native_events=True`, `require_window_focus=False`: window messages, no focus, no physical mouse; synthetic events did nothing on the development machine, spike D17) | `IE_INTERACTION_MODE=background` (the default) | `IE_INTERACTION_MODE=native` (takes focus; can mix with the user's keystrokes and mouse) |
+| A complete no-op `console` created where the page has none | `IE_CONSOLE_STUB=1` (off by default) | `IE_CONSOLE_STUB=0` |
+| Async (script) clicks: `e.click()` queued with `setTimeout`; not user-initiated, no mousedown/mouseup/focus, may be blocked by the pop-up blocker | `ie_click mode="async"` or `IE_CLICK_MODE=async` (default is `driver`, spike D1) | `mode="driver"` / `IE_CLICK_MODE=driver` (the default) |
+| COM input on dialogs and attached tabs: synthetic script events (`ie_fill`: focus, value, keydown/keypress/keyup/change/blur; `ie_hover`: mouseover/mouseenter), a timer click (`setTimeout`, no mousedown/mouseup/focus, also for `double`/`right`, which fire `ondblclick`/`oncontextmenu`), and posted `WM_KEYDOWN`/`WM_KEYUP` messages (documentMode 7+; `fireEvent` below 7) | `target="hwnd:…"`/`"tab:…"` | omit `target` (the driver path) when it works |
+| COM request wrapper: every COM read or action runs as script and leaves the window expandos `__iemcp_r` (`null`) and `__iemcp_e` (`''`) on the target window (top window for frame requests); their values are cleared after each read-back | `target="hwnd:…"`/`"tab:…"` | omit `target` |
+| Instrumentation left in an attached tab after `ie_detach` | `ie_attach` used | reload the tab |
+
+## Limits
+
+- **HTTPS is tunnel-only.** The proxy sees the host and timing of an HTTPS exchange, not its
+  content, and inserts no loader into HTTPS pages: errors and console output during their load
+  are not captured, only those after the first tool call on the page. Native `XMLHttpRequest` on
+  HTTPS pages is recorded by the page instrumentation (`source: page`).
+- **Cached responses are not seen.** A fresh browser-cache hit makes no request;
+  `IE_CAPTURE_NO_CACHE=1` turns revalidations into full fetches, not fresh hits.
+- **PAC files are unsupported**.
+- **The proxy may change the IE security zone** of intranet hosts that normally bypass a proxy
+  (document mode, Protected Mode, automatic logon). `IE_CAPTURE_BYPASS` or `IE_CAPTURE=0`.
+- **The loopback proxy is reachable by other users** of the same machine, for example on a
+  shared terminal server: it listens on `127.0.0.1` without authentication.
+- **The session's initial URL is not captured** and its load-time errors are not recorded.
+- **Dialog records can be lost on a fast close**: nothing reads a page while no call is running.
+- **Attached tabs keep the instrumentation until they are reloaded**; they have no proxy
+  capture and no driver tools (see [Attaching to a tab you opened](#attaching-to-a-tab-you-opened)).
+- **A `prompt` is answered only through the driver**: not inside a modal dialog and not on an
+  attached tab (`prompt not reachable: ask the user`); `ie_close_window` can cancel it.
+- **A TaskDialog raised by a frame whose top document is cross-origin or not instrumented is
+  never accepted by `ie_dialog`** (it fails closed; dismiss still works).
+- Only the visible tab of each Edge window can be attached.
+
+## Security
+
+- **Redaction is on by default** (`IE_CAPTURE_REDACT`): secret field and header names and every
+  value learned from them are masked in the server log, captured requests and responses, console
+  records, dialog summaries and URLs. The rules are in the configuration table.
+- **Captured traffic and console records stay in memory.** A JSONL copy is written only with
+  `IE_CAPTURE_JSONL=1`, and is deleted when the server exits unless `IE_KEEP_ARTIFACTS=1`.
+  Screenshots saved by name (`save_path`, a bare file name) go to the session's `screenshots`
+  folder and are **kept**. Never commit captured data.
+- **File access is confined.** `ie_upload` reads only inside `IE_UPLOAD_DIR` (disabled when
+  unset); `save_path` cannot leave the session's screenshots folder.
+- **Killing is identity-checked.** The server kills only processes it recorded for its own
+  session (or for a dead session, matched by Edge profile), and only if the recorded image name
+  and creation time still match, because Windows reuses PIDs. `taskkill` never runs with `/T`;
+  a process with no recorded identity is never killed.
+- **System dialogs are never clicked.** File open/save, print, security and credential prompts
+  and "leave this page?" are reported (`system dialog: ask the user`) for you to act on. Only a
+  script `alert`/`confirm` the session can prove is its own is answered.
+- **What is never changed:** the registry (the one exception is the opt-in `IE_SITE_LIST` policy
+  writer, under HKCU), Windows, Internet Options, Protected Mode, zones, the system or WinINet
+  proxy, the firewall, Edge settings and certificates. The `ProxyOverride` list is only read.
+- **No outbound network calls of its own.** The proxy forwards only the browser's traffic (to
+  `IE_CAPTURE_UPSTREAM_PROXY` when set).
+- `ie_tabs` and `ie_attach` never list or attach to windows owned by another live ie-mcp session.
+- `IE_CLEAN_SESSION=1` clears your whole IE-mode cookie store and cache; it is off by default.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `could not start Edge IE mode after N tries` | Confirm IE mode renders the site manually in Edge; check `IE_SITE_LIST`; try bumping `IE_ATTACH_RETRIES`. |
+| `IEDriverServer ... not found`, or the selftest line `FAIL  IEDriverServer` | Put the 32-bit `IEDriverServer.exe` (`4.14.0`) in `%USERPROFILE%\.cache\selenium\IEDriverServer\win32\4.14.0\`, or set `IE_DRIVER_PATH`. A path that does not exist is an error, never silently replaced. |
+| `capture` is `off`, `page-only` or `unverified` in `ie_status` | `off`: `IE_CAPTURE=0`. `unverified`: no http(s) navigation since the session started; call `ie_goto`. `page-only`: the browser did not use the proxy; see `capture_note`, check `IE_CAPTURE_UPSTREAM_PROXY`, then `ie_close` and open again. Only XHR the page instrumentation sees is recorded meanwhile. |
+| `BLOCKED: modal dialog open`, or a dialog the tools cannot reach | List it with `ie_windows` and use `target="hwnd:<n>"` (COM, needs no driver) or `ie_switch_window`. If a `NOTICE:` names it, follow that. A system dialog (file, print, security, credentials) must be handled by you. `ie_close force=true` ends a hung session. |
+| `pywin32 is required to read IE documents over COM` | `pip install "ie-mcp[win32]"` (or `pip install pywin32`) in the environment the MCP client launches; modal dialogs by `hwnd:` and attached tabs need it. |
+| An `alert`/`confirm` stays open, or `ie_dialog` says `ask the user` | `ie_dialog` answers only alerts and confirms of this session (and a `prompt` through the driver). A TaskDialog needs a matching `ie_console` record (`IE_INSTRUMENT=1`) and a same-origin, instrumented top document; anything else is left to you. |
+| `could not start Edge IE mode after N tries` | Confirm IE mode renders the site manually in Edge; check `IE_SITE_LIST`; try bumping `IE_ATTACH_RETRIES`. If every attempt times out and IEDriver's log stops at "Using UI Automation to set window focus", the desktop is locked: unlock it. |
 | `IE session '<id>' is already owned` | Two clients used the same `IE_SESSION_ID`. Give each agent a unique ID, or omit it to use the MCP process PID automatically. |
 | `IE engine: NO (Chromium?)` in selftest | The site isn't matching the IE-mode site list; the page rendered in Chromium. Fix the site list / policy. |
 | Leftover Edge windows after a crash | Use `ie_browsers` to inspect and `ie_kill_orphans` to clean up. |
@@ -446,11 +562,11 @@ The server is the `ie_mcp` package: a tool registry plus one module per group of
 Install it editable so the `ie-mcp` command points at your working copy:
 
 ```bash
-git clone https://github.com/thomfilg/ie-mcp.git
-cd ie-mcp
-pip install -e .          # or: pipx install --editable .
+git clone https://github.com/ai-autocoder/ie-mcp-harness.git
+cd ie-mcp-harness
+pip install -e ".[win32]"   # or: pipx install --editable ".[win32]"
 
-# diagnose deps/paths and open a real IE-mode session
+# diagnose deps/paths and open a real IE-mode session on the bundled fixture site
 ie-mcp --selftest
 ```
 
@@ -483,6 +599,8 @@ Running straight from the clone without installing also works — `python -m ie_
 - `ie_mcp/js/` — the ES3 scripts injected into the page (`select.js`, `grid.js`,
   `ready_probe.js`, `instrument.js`, `hook.js`, `drain.js`).
 - `ie_mcp/cli.py` — the `--install`/`--selftest` CLI and the server start-up.
+- `ie_mcp/backends.py`, `ie_mcp/png.py`, `ie_mcp/win32/capture.py`, `ie_mcp/tools/attach.py` — the driver and COM backends, the PNG encoder, window capture, attached tabs.
+- `ie_mcp_fixtures/` — the generic legacy fixture site (served from `127.0.0.1`), used by the tests and `--selftest`; shipped in the wheel.
 - `pyproject.toml` — packaging + the `ie-mcp` console-script entry point (`ie_mcp.cli:main`).
 - `requirements.txt` — runtime deps (just selenium; mirrors `pyproject.toml`).
 
@@ -589,6 +707,10 @@ python scripts/run_integration.py it_read_interact   # one module
 ```
 
 Each module closes its session and checks that no Edge or IEDriver process it started is left.
+`it_e2e_mcp` starts `python -m ie_mcp` as a subprocess and drives a whole session over stdio
+(frames, a form post, a modal dialog, console, screenshot), then checks that closing stdin with a
+dialog open leaves no browser behind. `IE_FIXTURE_HOST` (default `127.0.0.1`) moves the fixture
+site to another loopback name for these tests.
 
 ### Contributing
 
@@ -615,4 +737,4 @@ Planned / in progress (subject to change while in alpha):
 
 ## License
 
-[MIT](LICENSE) © 2026 thomfilg
+[MIT](LICENSE) © 2026 thomfilg (upstream [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp)); the fork's changes are under the same license.

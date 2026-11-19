@@ -65,9 +65,9 @@ The spec's "Fidelity" table is the list. Add a row whenever you add a modificati
 | Python | **3.10+** (current selenium requires it; the development machine runs 3.14). |
 | Runtime deps | `selenium>=4.14.0,<5` only. Optional extra `.[win32]` adds `pywin32>=306` (COM backend); the server runs without it |
 
-IEDriver launches Edge with `--ie-mode-force`. Plan Task 2 confirms on this machine that the
-fixture pages then render in IE mode (Trident userAgent and the expected `documentMode`). Until
-then, treat that as unverified.
+IEDriver launches Edge with `--ie-mode-force`. The spike (plan Task 2) confirmed on the
+development machine that the fixture pages render in IE mode (Trident userAgent and the
+expected `documentMode`); `ie-mcp --selftest` re-checks it on any machine.
 
 Installing the dependencies declared in `pyproject.toml` (`pip install -e ".[win32]"`) is fine.
 Ask the user before downloading `IEDriverServer.exe`, any other binary, or any package not
@@ -89,16 +89,18 @@ python -m unittest discover -s tests -p "test_*.py" -v
 
 # integration tests: open a real, visible IE-mode window; need an unlocked desktop.
 # Files are tests/integration/it_*.py. The runner sets IE_MCP_INTEGRATION=1 itself and
-# FAILS if any test was skipped (from plan Task 8).
+# FAILS if any test was skipped. it_e2e_mcp.py runs `python -m ie_mcp` as a subprocess over stdio.
 python scripts/run_integration.py            # all
 python scripts/run_integration.py it_modal   # one module
 
 # serve the fixture site by hand; prints both origins (--host, --port, --alt-port)
 python -m ie_mcp_fixtures
 
-# check the setup end to end: opens and closes one real IE-mode session on IE_DEFAULT_URL
-# (which must be an http(s) URL). It does not clear your cookies or cache unless you set
-# IE_CLEAN_SESSION=1.
+# check the setup end to end against the bundled fixture site (ie_mcp_fixtures ships in the
+# wheel): dependencies and paths, an IE-mode session (Trident, documentMode 7), the proxy and
+# loader, instrumentation, a modal dialog, no leftover processes. One PASS/FAIL/SKIP line each,
+# then RESULT: PASS|FAIL (exit 0/1). It does not clear your cookies or cache unless you set
+# IE_CLEAN_SESSION=1. Opens a visible window: needs an unlocked desktop.
 ie-mcp --selftest            # needs `pip install -e .`; or: python -m ie_mcp --selftest
 
 # register a dev copy with Claude Code for manual testing
@@ -112,17 +114,8 @@ asserts it, and `ie_browsers` shows what is running.
 
 ## Architecture
 
-Upstream was a single file, `ie_mcp.py`; plan Task 3 (done) split it into the package below.
-Modules the later tasks add (further `tools/` modules and `js/` scripts) are listed here as the target; `win32/processes.py`,
-`win32/windows.py` and `win32/htmldoc.py` exist (Task 7); `backends.py`, the `com_*.js`
-scripts, `scripts/run_integration.py` and `tests/integration/` exist (Task 8);
-`win32/messages.py`, `win32/dialogs.py`, `tools/windows.py` and the rewritten `tools/dialogs.py`
-exist (Task 9); `capture/store.py` and `capture/redact.py` exist, and `session.log()` goes
-through `session.REDACTOR` (Task 10); `capture/proxy.py` exists (Task 11);
-`capture/console.py`, `tools/console.py` and `js/instrument.js`, `hook.js`, `drain.js` exist
-(Task 12); `capture/verify.py` and `tools/network.py` exist, and the proxy is wired into the
-session (Task 13); `png.py` and `win32/capture.py` exist, and `cli.main()` makes the process
-per-monitor DPI aware first (Task 14). Keep this section in sync with the plan and the code.
+Upstream was a single file, `ie_mcp.py`; the plan split it into the package below. Every module
+listed here exists. Keep this section in sync with the code.
 
 Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (never
 `from ie_mcp.config import SETTINGS`), so tests can replace it. Tools register themselves with
@@ -131,7 +124,8 @@ Settings live in `config.Settings`; code reads `config.SETTINGS` at call time (n
 ```
 ie_mcp/
   __main__.py        python -m ie_mcp -> cli.main()
-  cli.py             --selftest / --install / --uninstall / stdio server start
+  cli.py             --selftest (Report + verdict functions; drives the tools through protocol.handle against
+                     the fixture site) / --install / --uninstall / stdio server start
   config.py          Settings (every env var, read once), discover_driver_path
   protocol.py        JSON-RPC loop (one thread per tools/call), @tool registry, run_tool watchdog
                      (call_budget, BUSY/BLOCKED, CALL_CONTEXTS, MODAL_PROBE notices, POST_HOOKS, AFTER_CALL)
@@ -175,11 +169,11 @@ scripts/
 tests/
   test_*.py          unit tests (mocked, no browser)
   integration/       base.py (IntegrationTestCase: fixture server, call/text via protocol.handle,
-                     restart_session, asserts recorded PIDs gone); it_*.py real IE-mode tests
+                     restart_session, asserts recorded PIDs gone); it_*.py real IE-mode tests;
+                     it_e2e_mcp.py spawns `python -m ie_mcp` and speaks JSON-RPC over its stdio
 ```
 
-Key design points. These describe the **target state** the plan builds; until a task lands,
-the upstream code behaves as before:
+Key design points:
 
 - **One MCP process owns one long-lived Selenium session** (frame-based apps lose state if the
   session is recreated). Parallel agents use different `IE_SESSION_ID`s.

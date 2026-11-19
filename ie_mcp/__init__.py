@@ -4,4 +4,4 @@ Fork of https://github.com/thomfilg/ie-mcp (MIT). Entry points: ``ie_mcp.cli.mai
 (the ``ie-mcp`` command) and ``python -m ie_mcp``.
 """
 
-__version__ = "0.2.0.dev0"
+__version__ = "0.2.0"
