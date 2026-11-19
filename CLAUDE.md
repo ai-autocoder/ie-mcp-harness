@@ -8,13 +8,13 @@ Guidance for coding agents working in this repository.
 IE-only web applications** running in **Microsoft Edge IE mode** (the Trident engine), through
 the official Selenium **IEDriverServer**.
 
-This repository is a **fork** of [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT),
-cloned at upstream commit `e0937ff6f1bfb51b13c72310084af3fd17d062b0`. The remote `origin` is
-the fork, `github.com/ai-autocoder/ie-mcp-harness`. Upstream has no local remote; add it when
-needed with `git remote add upstream https://github.com/thomfilg/ie-mcp.git`. Development
-happens on the `harness` branch.
+This repository is a standalone project by Francesco Anzalone (`origin` =
+`github.com/ai-autocoder/ie-mcp-harness`, no longer a GitHub fork). It started from
+[thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT) at commit
+`e0937ff6f1bfb51b13c72310084af3fd17d062b0`; that project is called "upstream" in code comments.
+Development happens on the `harness` branch.
 
-The fork's goal: give an agent **full access** to an IE-mode page, on par with what a
+The project's goal: give an agent **full access** to an IE-mode page, on par with what a
 Chromium automation tool gives on a modern page, **without changing how the page behaves**:
 
 - read the DOM, text and HTML of every window, frame and modal dialog;
@@ -605,6 +605,7 @@ Write a code comment for every new quirk you work around; they are rarely obviou
 - One commit per plan task on the `harness` branch; conventional commit messages (`feat:`,
   `fix:`, `docs:`, `test:`, `refactor:`). Do not push, open PRs, or contact upstream without
   asking the user.
-- Keep upstream attribution in `LICENSE` and the README. Note in the README that this is a fork.
+- Francesco Anzalone is the author and copyright holder. Keep thomfilg's copyright line in
+  `LICENSE` (the MIT license requires it for the original code) and the credit in the README.
 - Update this file, the spec's Fidelity table and the README whenever a tool, env var, command
   or page modification changes.

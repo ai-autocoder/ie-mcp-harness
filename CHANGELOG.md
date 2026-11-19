@@ -1,11 +1,11 @@
 # Changelog
 
-This project is a fork of [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT). `0.1.0` is
-upstream's last release before the fork.
+`ie-mcp-harness` started from [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT).
+`0.1.0` is that project's last release, the one this project was built on.
 
 ## 1.0.0 — 2026-11-19
 
-First release of the fork.
+First release of ie-mcp-harness.
 
 The harness: full access to an IE-mode page without changing how it behaves.
 
@@ -37,7 +37,7 @@ The harness: full access to an IE-mode page without changing how it behaves.
   dialog and a leftover-process check; one PASS/FAIL/SKIP line each and `RESULT: PASS|FAIL`.
 - End-to-end test over stdio (`tests/integration/it_e2e_mcp.py`) and an integration runner that
   fails on skipped tests (`scripts/run_integration.py`).
-- README: fork notice, Fidelity, Limits and Security sections, troubleshooting rows.
+- README: origin and credits note, Fidelity, Limits and Security sections, troubleshooting rows.
 
 ### Changed behaviour (versus 0.1.0)
 

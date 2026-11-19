@@ -9,7 +9,7 @@ description = "MCP server that drives Microsoft Edge in IE mode (Trident) via th
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Francesco Anzalone" }, { name = "thomfilg" }]
+authors = [{ name = "Francesco Anzalone" }]
 keywords = ["mcp", "ie-mode", "internet-explorer", "edge", "selenium", "automation"]
 dependencies = ["selenium>=4.14.0,<5"]
 

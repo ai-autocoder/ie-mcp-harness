@@ -10,12 +10,12 @@
 
 **Give an LLM the ability to drive a legacy IE-only web application.**
 
-> **This is a fork.** `ie-mcp-harness` is a fork of
-> [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT), the project that created the Edge
-> IE-mode / IEDriver MCP server this one grew from; upstream's copyright stays in
-> [LICENSE](LICENSE). The fork adds the *harness*: full access to an IE-mode page without
+> `ie-mcp-harness` is written and maintained by **Francesco Anzalone**. It started from
+> [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT), a small Edge IE-mode / IEDriver
+> MCP server, and grew into a full *harness*: complete access to an IE-mode page without
 > changing how it behaves (modal dialogs, pop-ups and attached tabs over COM, network capture,
-> console and dialog records, window screenshots). The package and the command are still called
+> console and dialog records, window screenshots). The original copyright notice stays in
+> [LICENSE](LICENSE), as the MIT license requires. The package and the command are called
 > `ie-mcp`. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 > **Status: `1.0.0`, the first stable release.** From here on, versions follow
@@ -758,4 +758,5 @@ Ideas for later releases (not promised):
 
 ## License
 
-[MIT](LICENSE) © 2026 thomfilg (upstream [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp)); the fork's changes are under the same license.
+[MIT](LICENSE) © 2026 Francesco Anzalone. Includes code from the original
+[thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp), © 2026 thomfilg, under the same license.
