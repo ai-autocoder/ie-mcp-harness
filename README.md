@@ -6,7 +6,7 @@
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg)](#requirements)
 [![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io/)
 [![Status: stable](https://img.shields.io/badge/status-stable-brightgreen.svg)](CHANGELOG.md)
-[![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Version: 1.0.1](https://img.shields.io/badge/version-1.0.1-blue.svg)](CHANGELOG.md)
 
 **Give an LLM the ability to drive a legacy IE-only web application.**
 
@@ -18,7 +18,7 @@
 > [LICENSE](LICENSE), as the MIT license requires. The package and the command are called
 > `ie-mcp`. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
-> **Status: `1.0.0`, the first stable release.** From here on, versions follow
+> **Status: stable (`1.0.1`; `1.0.0` was the first stable release).** Versions follow
 > [semantic versioning](https://semver.org/): a tool, argument or setting is removed or changes
 > meaning only in a new major version. See [CHANGELOG.md](CHANGELOG.md). Issues and PRs
 > welcome — see [Development](#development) and [Roadmap](#roadmap).

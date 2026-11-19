@@ -3,6 +3,13 @@
 `ie-mcp-harness` started from [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT).
 `0.1.0` is that project's last release, the one this project was built on.
 
+## 1.0.1 — 2026-11-19
+
+- Francesco Anzalone is the author and copyright holder: `LICENSE`, package metadata, README and
+  CHANGELOG say so. The project is standalone (no longer a GitHub fork); the original
+  thomfilg/ie-mcp copyright notice stays in `LICENSE`, as the MIT license requires.
+- No code changes.
+
 ## 1.0.0 — 2026-11-19
 
 First release of ie-mcp-harness.

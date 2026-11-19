@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ie-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "MCP server that drives Microsoft Edge in IE mode (Trident) via the Selenium IEDriver — automate legacy IE-only web apps from any MCP client."
 readme = "README.md"
 requires-python = ">=3.10"
