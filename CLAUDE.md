@@ -97,6 +97,11 @@ python scripts/run_integration.py it_modal   # one module
 # serve the fixture site by hand; prints both origins (--host, --port, --alt-port)
 python -m ie_mcp_fixtures
 
+# scripted demo (not an agent): fixed MCP tool calls on demo.htm, printed one per line.
+# `conhost.exe python demo/run_demo.py --record raw.mkv` also lays out and records the
+# windows with ffmpeg; demo/README.md has the encoding commands. Opens a visible window.
+python demo/run_demo.py
+
 # check the setup end to end against the bundled fixture site (ie_mcp_fixtures ships in the
 # wheel): dependencies and paths, an IE-mode session (Trident, documentMode 7), the proxy and
 # loader, instrumentation, a modal dialog, no leftover processes. One PASS/FAIL/SKIP line each,
@@ -163,7 +168,11 @@ ie_mcp/
                      attach.py, diagnostics.py (ie_status incl. capture/modifications)
 ie_mcp_fixtures/
   server.py          start_fixture_server (origins 127.0.0.1 and localhost), requests log, python -m ie_mcp_fixtures
-  site/              legacy fixture pages
+  site/              legacy fixture pages (demo.htm: the form the demo clip uses)
+demo/
+  run_demo.py        scripted demo over stdio (+ --record: window layout, black backdrop, gdigrab)
+  README.md          recording and encoding commands
+docs/media/          README images (the demo GIF)
 scripts/
   spike_ie_mode.py   plan Task 2 diagnostic
   run_integration.py integration runner (sets env, fails on skips)
