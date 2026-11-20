@@ -10,6 +10,10 @@
 
 **Give an LLM the ability to drive a legacy IE-only web application.**
 
+![A Claude Code session on the left asks for a form to be filled and sent; on the right, Edge in IE mode shows the bundled test page being filled, a confirm dialog, and the echoed POST](docs/media/demo-live.gif)
+
+*A real Claude Code session using the ie-mcp tools on the bundled test page in Edge IE mode (sped up 2x).*
+
 > `ie-mcp-harness` is written and maintained by **Francesco Anzalone**. It started from
 > [thomfilg/ie-mcp](https://github.com/thomfilg/ie-mcp) (MIT), a small Edge IE-mode / IEDriver
 > MCP server, and grew into a full *harness*: complete access to an IE-mode page without
@@ -158,6 +162,23 @@ to run them, but it is notoriously awkward to automate:
 - Frame-based apps lose state if the session is recreated.
 
 `ie-mcp` works around all of these so the model gets a stable, high-level interface.
+
+---
+
+## How it works
+
+`ie-mcp` is an MCP server that talks to the client over stdio. Each tool call goes to one
+long-lived Selenium IEDriver session in Edge IE mode, or over COM to a modal dialog or tab the
+driver cannot reach. A local proxy that only that browser uses records its HTTP traffic, and a
+small script in the page records script errors, dialogs and console output.
+
+![A terminal on the left lists MCP tool calls one per line; on the right, Edge in IE mode shows the test form being filled, a confirm dialog, and the echoed POST](docs/media/demo-scripted.gif)
+
+*MCP tool calls driving the bundled test page in Edge IE mode.*
+
+The clip is [`demo/run_demo.py`](demo/run_demo.py). It makes the same calls every run: `ie_goto`
+to the test form, two `ie_fill`, `ie_click` on Send, `ie_dialog` to accept the page's
+`confirm`, and `ie_network` to read the POST the proxy captured.
 
 ---
 
@@ -733,6 +754,12 @@ CI (`.github/workflows/ci.yml`) runs the unit tests on `windows-latest` with Pyt
 3.14 and checks that the wheel ships the server and the fixture site. It cannot run the
 integration tests or `ie-mcp --selftest` (no IE mode on a hosted runner), so run those by hand
 before a release.
+
+### Demo clip
+
+`python demo/run_demo.py` runs the scripted demo shown in [How it works](#how-it-works). It opens
+a visible IE-mode window. [`demo/README.md`](demo/README.md) has the recording and encoding
+commands.
 
 ### Contributing
 
