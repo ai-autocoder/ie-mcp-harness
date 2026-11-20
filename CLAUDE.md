@@ -172,7 +172,7 @@ ie_mcp_fixtures/
 demo/
   run_demo.py        scripted demo over stdio (+ --record: window layout, black backdrop, gdigrab)
   README.md          recording and encoding commands
-docs/media/          README images (the demo GIF)
+docs/media/          README images (the demo GIFs: live Claude Code take, scripted demo)
 scripts/
   spike_ie_mode.py   plan Task 2 diagnostic
   run_integration.py integration runner (sets env, fails on skips)

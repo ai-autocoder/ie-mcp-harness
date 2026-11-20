@@ -19,6 +19,7 @@ import ctypes.wintypes as wt
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -199,7 +200,19 @@ def start_ffmpeg(path, region):
         [ffmpeg, "-loglevel", "error", "-y", "-f", "gdigrab", "-framerate", "30",
          "-draw_mouse", "0", "-offset_x", str(x), "-offset_y", str(y),
          "-video_size", f"{w}x{h}", "-i", "desktop", "-c:v", "libx264", "-preset", "ultrafast",
-         "-crf", "0", "-pix_fmt", "yuv444p", str(path)], stdin=subprocess.PIPE)
+         "-crf", "0", "-pix_fmt", "yuv444p", str(path)],
+        # its messages would land in the console being recorded
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def stop_ffmpeg(recorder):
+    try:
+        recorder.communicate(b"q", timeout=30)
+    except subprocess.TimeoutExpired:
+        recorder.kill()
+        recorder.wait()
+    if recorder.returncode:
+        print(f"ffmpeg exited with {recorder.returncode}: the recording may be incomplete")
 
 
 def main():
@@ -221,10 +234,10 @@ def main():
     enable_vt()
     site = start_fixture_server(port=PORT)
     base = f"http://127.0.0.1:{PORT}/"
-    env = dict(os.environ, IE_INTERACTION_MODE="background",
-               IE_SESSION_ROOT=tempfile.mkdtemp(prefix="ie-mcp-demo-"))
+    session_root = tempfile.mkdtemp(prefix="ie-mcp-demo-")
+    env = dict(os.environ, IE_INTERACTION_MODE="background", IE_SESSION_ROOT=session_root)
     mcp = Mcp(env)
-    recorder = None
+    recorder = edge = None
     try:
         print("starting the IE-mode browser...", flush=True)
         ok, text, _ = mcp.call("ie_open", url=base + "index.htm")
@@ -267,7 +280,10 @@ def main():
             if "/echo" in text:
                 break
             time.sleep(0.1)
-        line = next(l for l in text.splitlines() if "/echo" in l).split()
+        posts = [l for l in text.splitlines() if "/echo" in l]
+        if not posts:
+            raise SystemExit("ie_network never listed the POST to /echo: " + text)
+        line = posts[0].split()
         show("ie_network", "POST", ok, ms, note=f"{line[2]} /echo -> {line[3]}, {line[5]} bytes")
         time.sleep(2.0)
 
@@ -277,13 +293,18 @@ def main():
     finally:
         print("\x1b[?25h", end="", flush=True)  # cursor back
         if recorder:
-            recorder.communicate(b"q", timeout=30)
-        if args.record:
-            for hwnd in (kernel32.GetConsoleWindow(),):
-                user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x13)
-        mcp.call("ie_close")
-        mcp.close()
-        site.stop()
+            stop_ffmpeg(recorder)
+        if args.record:  # SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            for hwnd in (kernel32.GetConsoleWindow(), edge):
+                if hwnd:
+                    user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, 0x13)
+        # each step on its own, so one failure (a dead server) does not skip the rest
+        for cleanup in (lambda: mcp.call("ie_close"), mcp.close, site.stop,
+                        lambda: shutil.rmtree(session_root, ignore_errors=True)):
+            try:
+                cleanup()
+            except Exception as exc:  # noqa: BLE001 - report and keep cleaning up
+                print(f"cleanup: {exc!r}")
 
 
 if __name__ == "__main__":
